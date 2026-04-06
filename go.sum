@@ -1,0 +1,4 @@
+github.com/benbjohnson/clock v1.3.5 h1:VvXlSJBzZpA/zum6Sj74hxwYI2DIxRWuNIoXAzHZz5o=
+github.com/benbjohnson/clock v1.3.5/go.mod h1:J11/hYXuz8f4ySSvYwY0FKfm+ezbsZBKZxNJlLklBHA=
+github.com/codesuki/go-time-series v0.0.0-20210430055340-c4c8d8fa61d4 h1:xKzsxCG6QVIh31ZIXuRR/eCvEflCFwpeET6cvTFYhVo=
+github.com/codesuki/go-time-series v0.0.0-20210430055340-c4c8d8fa61d4/go.mod h1:Rm6RJZPJg9b/vwne8fiAcfh0X5QFNszEhijK6d6qW9k=
