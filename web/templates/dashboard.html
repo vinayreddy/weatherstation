@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Station</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <!-- Nav -->
+    <nav class="bg-gray-800 border-b border-gray-700">
+        <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+            <h1 class="text-xl font-bold text-white">Weather Station</h1>
+            <div class="flex gap-4 text-sm">
+                <a href="/" class="text-blue-400 font-medium">Dashboard</a>
+                <a href="/history" class="text-gray-400 hover:text-white">History</a>
+                <a href="/highlights" class="text-gray-400 hover:text-white">Highlights</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        <!-- Live camera + conditions -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+            <!-- Camera image -->
+            <div class="lg:col-span-2">
+                <div class="bg-gray-800 rounded-lg overflow-hidden shadow-lg">
+                    <img id="live-image" src="/images/current.jpg" alt="Live camera"
+                         class="w-full h-auto" loading="eager">
+                    <div class="px-4 py-2 text-xs text-gray-500" id="image-time">Loading...</div>
+                </div>
+            </div>
+
+            <!-- Current conditions -->
+            <div class="space-y-3" id="conditions">
+                <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+                    <div class="text-xs text-gray-500 uppercase tracking-wide">Temperature</div>
+                    <div class="text-4xl font-bold mt-1" id="temp">--</div>
+                    <div class="text-sm text-gray-400 mt-1">Feels like <span id="feels-like">--</span></div>
+                </div>
+                <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+                    <div class="text-xs text-gray-500 uppercase tracking-wide">Wind</div>
+                    <div class="text-2xl font-bold mt-1" id="wind">--</div>
+                    <div class="text-sm text-gray-400 mt-1">Gusts: <span id="wind-gust">--</span></div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+                        <div class="text-xs text-gray-500 uppercase tracking-wide">Humidity</div>
+                        <div class="text-2xl font-bold mt-1" id="humidity">--</div>
+                    </div>
+                    <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+                        <div class="text-xs text-gray-500 uppercase tracking-wide">Pressure</div>
+                        <div class="text-2xl font-bold mt-1" id="pressure">--</div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+                        <div class="text-xs text-gray-500 uppercase tracking-wide">Rain Rate</div>
+                        <div class="text-2xl font-bold mt-1" id="precip-rate">--</div>
+                    </div>
+                    <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+                        <div class="text-xs text-gray-500 uppercase tracking-wide">UV Index</div>
+                        <div class="text-2xl font-bold mt-1" id="uv">--</div>
+                    </div>
+                </div>
+                <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+                    <div class="text-xs text-gray-500 uppercase tracking-wide">Dew Point</div>
+                    <div class="text-2xl font-bold mt-1" id="dew-point">--</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Today's chart -->
+        <div class="bg-gray-800 rounded-lg p-4 shadow-lg">
+            <h2 class="text-lg font-semibold mb-3">Today</h2>
+            <div style="height: 250px;">
+                <canvas id="today-chart"></canvas>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

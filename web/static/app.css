@@ -1,0 +1,21 @@
+/* Smooth transitions for condition cards */
+#conditions .bg-gray-800 {
+    transition: background-color 0.3s;
+}
+#conditions .bg-gray-800:hover {
+    background-color: rgb(55 65 81);
+}
+
+/* Image popup animation */
+#image-popup {
+    transition: opacity 0.2s;
+}
+#image-popup.show {
+    display: flex;
+    opacity: 1;
+}
+
+/* Active range button */
+.range-btn.active {
+    background-color: rgb(37 99 235);
+}

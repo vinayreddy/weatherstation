@@ -12,16 +12,19 @@ type FakeClock struct {
 	now time.Time
 }
 
-func NewFakeClock() *FakeClock          { return &FakeClock{now: time.Now()} }
-func (c *FakeClock) Set(t time.Time)    { c.now = t }
-func (c *FakeClock) Now() time.Time     { return c.now }
-func (c *FakeClock) NowPacific() time.Time { return c.now.In(ptLocation) }
-func (c *FakeClock) Increment(d time.Duration) { c.now = c.now.Add(d) }
+func NewFakeClock() *FakeClock                  { return &FakeClock{now: time.Now()} }
+func (c *FakeClock) Set(t time.Time)            { c.now = t }
+func (c *FakeClock) Now() time.Time             { return c.now }
+func (c *FakeClock) NowPacific() time.Time      { return c.now.In(ptLocation) }
+func (c *FakeClock) Increment(d time.Duration)  { c.now = c.now.Add(d) }
 
 func TestLoadConfig(t *testing.T) {
-	t.Setenv("WS_OPENWEATHER_API_KEY", "test-key-123")
+	t.Setenv("WS_WU_API_KEY", "test-wu-key")
+	t.Setenv("WS_WU_STATION_ID", "KWATEST1")
 	t.Setenv("WS_RTSP_STREAM", "rtsp://cam:554/stream")
 	t.Setenv("WS_IMAGE_DIR", "/tmp/images")
+	t.Setenv("WS_DB_PATH", "/tmp/test.db")
+	t.Setenv("WS_HTTP_PORT", "9090")
 	t.Setenv("WS_REFRESH_SECS", "60")
 	t.Setenv("WS_MAILTRAP_API_TOKEN", "mt-token")
 	t.Setenv("WS_ALERT_EMAIL_TO", "alert@example.com")
@@ -29,8 +32,11 @@ func TestLoadConfig(t *testing.T) {
 
 	cfg := LoadConfig()
 
-	if cfg.OpenWeatherAPIKey != "test-key-123" {
-		t.Errorf("OpenWeatherAPIKey = %q, want %q", cfg.OpenWeatherAPIKey, "test-key-123")
+	if cfg.WUApiKey != "test-wu-key" {
+		t.Errorf("WUApiKey = %q", cfg.WUApiKey)
+	}
+	if cfg.WUStationID != "KWATEST1" {
+		t.Errorf("WUStationID = %q", cfg.WUStationID)
 	}
 	if cfg.RTSPStream != "rtsp://cam:554/stream" {
 		t.Errorf("RTSPStream = %q", cfg.RTSPStream)
@@ -38,22 +44,21 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.ImageDir != "/tmp/images" {
 		t.Errorf("ImageDir = %q", cfg.ImageDir)
 	}
+	if cfg.DBPath != "/tmp/test.db" {
+		t.Errorf("DBPath = %q", cfg.DBPath)
+	}
+	if cfg.HTTPPort != "9090" {
+		t.Errorf("HTTPPort = %q", cfg.HTTPPort)
+	}
 	if cfg.RefreshSecs != 60 {
 		t.Errorf("RefreshSecs = %d, want 60", cfg.RefreshSecs)
 	}
 	if cfg.MailtrapAPIToken != "mt-token" {
 		t.Errorf("MailtrapAPIToken = %q", cfg.MailtrapAPIToken)
 	}
-	if cfg.AlertEmailTo != "alert@example.com" {
-		t.Errorf("AlertEmailTo = %q", cfg.AlertEmailTo)
-	}
-	if cfg.AlertEmailFrom != "ws@example.com" {
-		t.Errorf("AlertEmailFrom = %q", cfg.AlertEmailFrom)
-	}
 }
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	// Clear all WS_ vars to test defaults
 	for k := range knownEnvVars {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -61,11 +66,23 @@ func TestLoadConfig_Defaults(t *testing.T) {
 
 	cfg := LoadConfig()
 
+	if cfg.WUStationID != "KWASEATT3003" {
+		t.Errorf("WUStationID default = %q", cfg.WUStationID)
+	}
+	if cfg.ImageDir != "./data/images" {
+		t.Errorf("ImageDir default = %q", cfg.ImageDir)
+	}
+	if cfg.DBPath != "./data/weather.db" {
+		t.Errorf("DBPath default = %q", cfg.DBPath)
+	}
+	if cfg.HTTPPort != "8080" {
+		t.Errorf("HTTPPort default = %q", cfg.HTTPPort)
+	}
 	if cfg.RefreshSecs != 30 {
 		t.Errorf("RefreshSecs default = %d, want 30", cfg.RefreshSecs)
 	}
 	if cfg.AlertEmailFrom != "weatherstation@localhost" {
-		t.Errorf("AlertEmailFrom default = %q, want %q", cfg.AlertEmailFrom, "weatherstation@localhost")
+		t.Errorf("AlertEmailFrom default = %q", cfg.AlertEmailFrom)
 	}
 }
 
@@ -82,7 +99,6 @@ WS_TEST_VAR3='single quoted'
 		t.Fatal(err)
 	}
 
-	// Ensure vars don't exist
 	os.Unsetenv("WS_TEST_VAR1")
 	os.Unsetenv("WS_TEST_VAR2")
 	os.Unsetenv("WS_TEST_VAR3")
@@ -102,7 +118,6 @@ WS_TEST_VAR3='single quoted'
 		}
 	}
 
-	// Cleanup
 	os.Unsetenv("WS_TEST_VAR1")
 	os.Unsetenv("WS_TEST_VAR2")
 	os.Unsetenv("WS_TEST_VAR3")

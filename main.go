@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"embed"
 	"flag"
 	"fmt"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -13,6 +15,9 @@ import (
 	"time"
 	_ "time/tzdata" // embed timezone data for raspi
 )
+
+//go:embed web/templates web/static
+var webFS embed.FS
 
 // Build-time variables injected via ldflags.
 var (
@@ -29,6 +34,7 @@ var (
 	versionFlag         = flag.Bool("version", false, "Print version info and exit")
 	forkAndMonitorFlag  = flag.Bool("fork_and_monitor", true, "Fork and monitor the child process, restarting on crashes")
 	exitAfterCrashAlert = flag.Bool("exit_after_crash_alert", false, "Exit after crashing enough times to trigger an alert")
+	backfillFrom        = flag.String("backfill", "", "Backfill weather data from this date (YYYY-MM-DD). Runs in background alongside live server, ~800 days/day, resumes across restarts.")
 )
 
 var ptLocation *time.Location
@@ -60,34 +66,43 @@ func (c *RealClock) NowPacific() time.Time { return time.Now().In(ptLocation) }
 // ---------------------------------------------------------------------------
 
 type Config struct {
-	OpenWeatherAPIKey string
-	RTSPStream        string
-	ImageDir          string
-	RefreshSecs       int
-	MailtrapAPIToken  string
-	AlertEmailTo      string
-	AlertEmailFrom    string
+	WUApiKey         string
+	WUStationID      string
+	RTSPStream       string
+	ImageDir         string
+	DBPath           string
+	HTTPPort         string
+	RefreshSecs      int
+	MailtrapAPIToken string
+	AlertEmailTo     string
+	AlertEmailFrom   string
 }
 
 var knownEnvVars = map[string]bool{
-	"WS_OPENWEATHER_API_KEY": true,
-	"WS_RTSP_STREAM":         true,
-	"WS_IMAGE_DIR":           true,
-	"WS_REFRESH_SECS":        true,
-	"WS_MAILTRAP_API_TOKEN":  true,
-	"WS_ALERT_EMAIL_TO":      true,
-	"WS_ALERT_EMAIL_FROM":    true,
+	"WS_WU_API_KEY":         true,
+	"WS_WU_STATION_ID":      true,
+	"WS_RTSP_STREAM":        true,
+	"WS_IMAGE_DIR":          true,
+	"WS_DB_PATH":            true,
+	"WS_HTTP_PORT":          true,
+	"WS_REFRESH_SECS":       true,
+	"WS_MAILTRAP_API_TOKEN": true,
+	"WS_ALERT_EMAIL_TO":     true,
+	"WS_ALERT_EMAIL_FROM":   true,
 }
 
 func LoadConfig() *Config {
 	return &Config{
-		OpenWeatherAPIKey: os.Getenv("WS_OPENWEATHER_API_KEY"),
-		RTSPStream:        os.Getenv("WS_RTSP_STREAM"),
-		ImageDir:          os.Getenv("WS_IMAGE_DIR"),
-		RefreshSecs:       getEnvInt("WS_REFRESH_SECS", 30),
-		MailtrapAPIToken:  os.Getenv("WS_MAILTRAP_API_TOKEN"),
-		AlertEmailTo:      os.Getenv("WS_ALERT_EMAIL_TO"),
-		AlertEmailFrom:    getEnv("WS_ALERT_EMAIL_FROM", "weatherstation@localhost"),
+		WUApiKey:         os.Getenv("WS_WU_API_KEY"),
+		WUStationID:      getEnv("WS_WU_STATION_ID", "KWASEATT3003"),
+		RTSPStream:       os.Getenv("WS_RTSP_STREAM"),
+		ImageDir:         getEnv("WS_IMAGE_DIR", "./data/images"),
+		DBPath:           getEnv("WS_DB_PATH", "./data/weather.db"),
+		HTTPPort:         getEnv("WS_HTTP_PORT", "8080"),
+		RefreshSecs:      getEnvInt("WS_REFRESH_SECS", 30),
+		MailtrapAPIToken: os.Getenv("WS_MAILTRAP_API_TOKEN"),
+		AlertEmailTo:     os.Getenv("WS_ALERT_EMAIL_TO"),
+		AlertEmailFrom:   getEnv("WS_ALERT_EMAIL_FROM", "weatherstation@localhost"),
 	}
 }
 
@@ -218,10 +233,43 @@ func main() {
 
 	slog.Info("starting weatherstation", "version", versionInfo())
 
+	db := InitDB(cfg.DBPath)
+	defer db.Close()
+
+	var wu *WUClient
+	if cfg.WUApiKey != "" {
+		wu = NewWUClient(cfg.WUApiKey, cfg.WUStationID)
+	}
+
+	// Start background backfill if requested (runs alongside the live server).
+	// Only needs to be passed once — progress is saved in the DB.
+	if *backfillFrom != "" {
+		if wu == nil {
+			log.Fatal("WS_WU_API_KEY is required for backfill")
+		}
+		startBackfill(wu, db, *backfillFrom)
+	} else if cursor := kvGet(db, kvBackfillCursor); cursor != "" && wu != nil {
+		// Resume a previously started backfill
+		go runBackfillLoop(wu, db)
+	}
+
 	wss := &WeatherStationServer{
 		config: cfg,
 		clock:  cl,
 		al:     alerter,
+		db:     db,
+		wu:     wu,
 	}
+
+	// Start HTTP server in background
+	mux := NewAPIMux(wss)
+	go func() {
+		addr := ":" + cfg.HTTPPort
+		slog.Info("starting HTTP server", "addr", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Fatalf("HTTP server failed: %v", err)
+		}
+	}()
+
 	wss.backgroundLoop()
 }
