@@ -231,7 +231,7 @@ func main() {
 		return
 	}
 
-	slog.Info("starting weatherstation", "version", versionInfo())
+	log.Println("starting weatherstation\n" + versionInfo())
 
 	db := InitDB(cfg.DBPath)
 	defer db.Close()

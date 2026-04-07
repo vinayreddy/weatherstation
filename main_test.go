@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -121,6 +122,34 @@ WS_TEST_VAR3='single quoted'
 	os.Unsetenv("WS_TEST_VAR1")
 	os.Unsetenv("WS_TEST_VAR2")
 	os.Unsetenv("WS_TEST_VAR3")
+}
+
+func TestVersionInfo(t *testing.T) {
+	BuildDate = "2026-04-07 15:47:17 UTC"
+	BuildUser = "testuser"
+	UnameInfo = "Linux testhost 6.1.0"
+	GitCommit = "abc1234"
+	GitBranch = "main"
+
+	got := versionInfo()
+
+	lines := strings.Split(got, "\n")
+	if len(lines) != 5 {
+		t.Fatalf("versionInfo() has %d lines, want 5:\n%s", len(lines), got)
+	}
+
+	want := []string{
+		"Build Date: 2026-04-07 15:47:17 UTC",
+		"Build User: testuser",
+		"Uname Info: Linux testhost 6.1.0",
+		"Git Commit: abc1234",
+		"Git Branch: main",
+	}
+	for i, w := range want {
+		if lines[i] != w {
+			t.Errorf("line %d = %q, want %q", i, lines[i], w)
+		}
+	}
 }
 
 func TestLoadEnvFile_NoOverride(t *testing.T) {
