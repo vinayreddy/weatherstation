@@ -18,16 +18,18 @@ LDFLAGS = -ldflags "\
 
 build:
 	@echo "Building $(BINARY_NAME)..."
-	@go build $(LDFLAGS) -o $(BINARY_NAME) . || { echo "FAILED: go build -o $(BINARY_NAME) ."; exit 1; }
+	@mkdir -p bin
+	@go build $(LDFLAGS) -o bin/$(BINARY_NAME) . || { echo "FAILED: go build -o bin/$(BINARY_NAME) ."; exit 1; }
 
 build-raspi:
 	@echo "Building $(BINARY_NAME)-linux-arm64..."
-	@GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o $(BINARY_NAME)-linux-arm64 . || { echo "FAILED: GOOS=linux GOARCH=arm64 go build -o $(BINARY_NAME)-linux-arm64 ."; exit 1; }
+	@mkdir -p bin
+	@GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o bin/$(BINARY_NAME)-linux-arm64 . || { echo "FAILED: GOOS=linux GOARCH=arm64 go build -o bin/$(BINARY_NAME)-linux-arm64 ."; exit 1; }
 
 build-all: build build-raspi
 
 clean:
-	rm -f $(BINARY_NAME) $(BINARY_NAME)-linux-arm64
+	rm -rf bin/
 
 test:
 	go test -v ./...
