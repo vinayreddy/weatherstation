@@ -57,20 +57,21 @@ func (ws *WeatherStationServer) weatherPollLoop() {
 }
 
 func (ws *WeatherStationServer) fetchAndStoreWeather() {
-	obs, err := ws.wu.FetchCurrent()
+	today := time.Now().Format("20060102")
+	observations, err := ws.wu.FetchHistory(today)
 	if err != nil {
-		slog.Error("failed to fetch weather", "err", err)
+		slog.Error("failed to fetch weather history", "err", err)
 		return
 	}
-	if err := InsertObservation(ws.db, obs); err != nil {
-		slog.Error("failed to store observation", "err", err)
-		return
+	inserted := 0
+	for i := range observations {
+		if err := InsertObservation(ws.db, &observations[i]); err != nil {
+			slog.Error("failed to store observation", "err", err)
+			continue
+		}
+		inserted++
 	}
-	slog.Info("weather updated",
-		"temp", obs.Temp,
-		"humidity", obs.Humidity,
-		"wind", obs.WindSpeed,
-		"precip", obs.PrecipRate)
+	slog.Info("weather updated", "date", today, "fetched", len(observations), "inserted", inserted)
 }
 
 // captureAndOverlay captures an RTSP frame, overlays weather data, and saves it.
