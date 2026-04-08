@@ -8,6 +8,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -15,11 +16,16 @@ import (
 var wuBaseURL = "https://api.weather.com/v2/pws"
 
 // WUClient fetches weather data from the Weather Underground PWS API.
+// All requests are rate-limited to at most one every minRequestInterval.
 type WUClient struct {
 	apiKey    string
 	stationID string
 	client    *http.Client
+	mu        sync.Mutex
+	lastReq   time.Time
 }
+
+const minRequestInterval = 6 * time.Second // ~10 req/min, well under WU's 30/min limit
 
 func NewWUClient(apiKey, stationID string) *WUClient {
 	return &WUClient{
@@ -65,6 +71,13 @@ func (c *WUClient) FetchHistory(date string) ([]Observation, error) {
 }
 
 func (c *WUClient) fetch(url string, dst any) error {
+	c.mu.Lock()
+	if wait := minRequestInterval - time.Since(c.lastReq); wait > 0 {
+		time.Sleep(wait)
+	}
+	c.lastReq = time.Now()
+	c.mu.Unlock()
+
 	resp, err := c.client.Get(url)
 	if err != nil {
 		return Wrap(err, "http request")
@@ -256,7 +269,6 @@ func truncate(s string, n int) string {
 // limit, that leaves ~900 for backfill. We use 800/day max to keep headroom.
 const (
 	backfillDailyBudget = 800
-	backfillInterval    = 6 * time.Second // 10 req/min, well under 30/min limit
 	kvBackfillCursor    = "backfill_cursor"
 	kvBackfillOrigin    = "backfill_origin"
 )
@@ -327,12 +339,12 @@ func runBackfillLoop(wu *WUClient, db *sql.DB) {
 				}
 				slog.Info("backfill", "date", dayLabel, "observations", inserted,
 					"progress", fmt.Sprintf("%d/%d", fetched+1, budget))
+				SetBackfillTimestamp(db, dateStr, time.Now().Unix())
 			}
 
 			d = d.AddDate(0, 0, 1)
 			kvSet(db, kvBackfillCursor, d.Format("2006-01-02"))
 			fetched++
-			time.Sleep(backfillInterval)
 		}
 
 		// Check if we're done
