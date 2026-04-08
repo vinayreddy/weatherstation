@@ -46,21 +46,27 @@ func (ws *WeatherStationServer) backgroundLoop() {
 
 // weatherPollLoop fetches weather data from WU every 5 minutes and stores it in SQLite.
 func (ws *WeatherStationServer) weatherPollLoop() {
-	// Backfill today's history on startup to fill gaps from any downtime.
-	ws.backfillToday()
+	// Backfill recent days on startup.
+	ws.backfillRecentDays()
 
 	// Fetch immediately on startup
 	ws.fetchAndStoreWeather()
 
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
+
+	lastBackfillDay := time.Now().Day()
+	for t := range ticker.C {
 		ws.fetchAndStoreWeather()
+		// Re-run backfill once per day (when the day rolls over).
+		if t.Day() != lastBackfillDay {
+			lastBackfillDay = t.Day()
+			ws.backfillRecentDays()
+		}
 	}
 }
 
 func (ws *WeatherStationServer) fetchAndStoreWeather() {
-	// Fetch real-time current reading.
 	obs, err := ws.wu.FetchCurrent()
 	if err != nil {
 		slog.Error("failed to fetch weather", "err", err)
@@ -75,53 +81,52 @@ func (ws *WeatherStationServer) fetchAndStoreWeather() {
 		"humidity", obs.Humidity,
 		"wind", obs.WindSpeed,
 		"precip", obs.PrecipRate)
-
-	// Backfill 2 days ago (once per day) to capture all data points the
-	// station reported that we missed by only polling every 5 minutes.
-	ws.maybeBackfillRecent()
 }
 
-var lastBackfillDate string
+// backfillRecentDays scans the last 30 days. For each date that hasn't been
+// backfilled at least 48 hours after the end of that day, it fetches the full
+// day's history from WU and records the backfill timestamp. This ensures gaps
+// from polling intervals or downtime are eventually filled once WU has
+// complete data for the day.
+func (ws *WeatherStationServer) backfillRecentDays() {
+	now := time.Now()
+	for daysAgo := 0; daysAgo <= 30; daysAgo++ {
+		date := now.AddDate(0, 0, -daysAgo)
+		dateStr := date.Format("20060102")
 
-func (ws *WeatherStationServer) maybeBackfillRecent() {
-	twoDaysAgo := time.Now().AddDate(0, 0, -2).Format("20060102")
-	if twoDaysAgo == lastBackfillDate {
-		return
-	}
+		// End of this date = start of next day.
+		endOfDay := time.Date(date.Year(), date.Month(), date.Day()+1, 0, 0, 0, 0, date.Location())
+		threshold := endOfDay.Add(48 * time.Hour)
 
-	observations, err := ws.wu.FetchHistory(twoDaysAgo)
-	if err != nil {
-		slog.Error("failed to backfill recent history", "date", twoDaysAgo, "err", err)
-		return
-	}
-	inserted := 0
-	for i := range observations {
-		if err := InsertObservation(ws.db, &observations[i]); err != nil {
-			slog.Error("failed to store backfill observation", "err", err)
+		backfilledAt, err := GetBackfillTimestamp(ws.db, dateStr)
+		if err != nil {
+			slog.Error("failed to read backfill log", "date", dateStr, "err", err)
 			continue
 		}
-		inserted++
-	}
-	lastBackfillDate = twoDaysAgo
-	slog.Info("backfilled recent history", "date", twoDaysAgo, "inserted", inserted)
-}
 
-func (ws *WeatherStationServer) backfillToday() {
-	today := time.Now().Format("20060102")
-	observations, err := ws.wu.FetchHistory(today)
-	if err != nil {
-		slog.Error("failed to backfill today", "err", err)
-		return
-	}
-	inserted := 0
-	for i := range observations {
-		if err := InsertObservation(ws.db, &observations[i]); err != nil {
-			slog.Error("failed to store observation", "err", err)
+		// Skip if already backfilled at least 48h after end of day.
+		if backfilledAt > 0 && time.Unix(backfilledAt, 0).After(threshold) {
 			continue
 		}
-		inserted++
+
+		observations, err := ws.wu.FetchHistory(dateStr)
+		if err != nil {
+			slog.Error("backfill failed", "date", dateStr, "err", err)
+			continue
+		}
+		inserted := 0
+		for i := range observations {
+			if err := InsertObservation(ws.db, &observations[i]); err != nil {
+				slog.Error("failed to store backfill observation", "err", err)
+				continue
+			}
+			inserted++
+		}
+		if err := SetBackfillTimestamp(ws.db, dateStr, now.Unix()); err != nil {
+			slog.Error("failed to update backfill log", "date", dateStr, "err", err)
+		}
+		slog.Info("backfilled", "date", dateStr, "fetched", len(observations), "inserted", inserted)
 	}
-	slog.Info("backfilled today on startup", "date", today, "fetched", len(observations), "inserted", inserted)
 }
 
 // captureAndOverlay captures an RTSP frame, overlays weather data, and saves it.

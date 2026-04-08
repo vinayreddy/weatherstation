@@ -57,7 +57,9 @@ func (c *WUClient) FetchHistory(date string) ([]Observation, error) {
 
 	obs := make([]Observation, 0, len(resp.Observations))
 	for _, o := range resp.Observations {
-		obs = append(obs, *o.toObservation())
+		if parsed := o.toObservation(); parsed != nil {
+			obs = append(obs, *parsed)
+		}
 	}
 	return obs, nil
 }
@@ -192,6 +194,10 @@ func (o *wuObservation) toObservation() *Observation {
 }
 
 func (o *wuHistoryObservation) toObservation() *Observation {
+	// Skip observations where the station reported a timestamp but no sensor data.
+	if o.Imperial == nil || o.Imperial.TempAvg == nil {
+		return nil
+	}
 	obs := &Observation{}
 	if o.Epoch != nil {
 		obs.Timestamp = *o.Epoch

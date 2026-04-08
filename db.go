@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS backfill_log (
+    date          TEXT PRIMARY KEY,
+    backfilled_at INTEGER NOT NULL
+);
 `
 
 // Observation represents a single weather reading.
@@ -185,6 +190,22 @@ func NearestImage(db *sql.DB, ts int64) (*ImageRecord, error) {
 	}
 	img.IsArchived = archived != 0
 	return &img, nil
+}
+
+// GetBackfillTimestamp returns when a date was last backfilled, or 0 if never.
+func GetBackfillTimestamp(db *sql.DB, date string) (int64, error) {
+	var ts int64
+	err := db.QueryRow(`SELECT backfilled_at FROM backfill_log WHERE date = ?`, date).Scan(&ts)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return ts, err
+}
+
+// SetBackfillTimestamp records when a date was backfilled.
+func SetBackfillTimestamp(db *sql.DB, date string, ts int64) error {
+	_, err := db.Exec(`INSERT OR REPLACE INTO backfill_log (date, backfilled_at) VALUES (?, ?)`, date, ts)
+	return err
 }
 
 // imagePath returns the relative path for an image at the given time.
