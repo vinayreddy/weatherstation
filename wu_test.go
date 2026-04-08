@@ -109,8 +109,13 @@ func TestWUClient_FetchHistory(t *testing.T) {
 		}
 		resp := map[string]any{
 			"observations": []map[string]any{
-				{"epoch": json.Number("1712345000"), "humidity": json.Number("60"), "imperial": map[string]any{"temp": json.Number("50")}},
-				{"epoch": json.Number("1712345300"), "humidity": json.Number("62"), "imperial": map[string]any{"temp": json.Number("52")}},
+				{"epoch": json.Number("1712345000"), "humidityAvg": json.Number("60"), "winddirAvg": json.Number("180"),
+					"solarRadiationHigh": json.Number("100"), "uvHigh": json.Number("2"),
+					"imperial": map[string]any{"tempAvg": json.Number("50"), "windspeedAvg": json.Number("5"),
+						"windgustAvg": json.Number("12"), "dewptAvg": json.Number("40"), "pressureMax": json.Number("30.1"),
+						"precipRate": json.Number("0"), "precipTotal": json.Number("0")}},
+				{"epoch": json.Number("1712345300"), "humidityAvg": json.Number("62"), "winddirAvg": json.Number("190"),
+					"imperial": map[string]any{"tempAvg": json.Number("52"), "windspeedAvg": json.Number("6")}},
 			},
 		}
 		json.NewEncoder(w).Encode(resp)
@@ -131,5 +136,20 @@ func TestWUClient_FetchHistory(t *testing.T) {
 	}
 	if obs[0].Temp != 50 {
 		t.Errorf("first obs temp = %v, want 50", obs[0].Temp)
+	}
+	if obs[0].Humidity != 60 {
+		t.Errorf("first obs humidity = %v, want 60", obs[0].Humidity)
+	}
+	if obs[0].WindSpeed != 5 {
+		t.Errorf("first obs windSpeed = %v, want 5", obs[0].WindSpeed)
+	}
+	if obs[0].WindDir != 180 {
+		t.Errorf("first obs windDir = %v, want 180", obs[0].WindDir)
+	}
+	if obs[0].Pressure != 30.1 {
+		t.Errorf("first obs pressure = %v, want 30.1", obs[0].Pressure)
+	}
+	if obs[1].Temp != 52 {
+		t.Errorf("second obs temp = %v, want 52", obs[1].Temp)
 	}
 }

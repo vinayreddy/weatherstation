@@ -50,7 +50,7 @@ func (c *WUClient) FetchHistory(date string) ([]Observation, error) {
 	url := fmt.Sprintf("%s/history/all?stationId=%s&format=json&units=e&numericPrecision=decimal&date=%s&apiKey=%s",
 		wuBaseURL, c.stationID, date, c.apiKey)
 
-	var resp wuResponse
+	var resp wuHistoryResponse
 	if err := c.fetch(url, &resp); err != nil {
 		return nil, Wrap(err, "fetch history")
 	}
@@ -114,6 +114,34 @@ type wuImperial struct {
 	PrecipTotal *float64 `json:"precipTotal"`
 }
 
+// History endpoint (/history/all) returns high/low/avg variants of each field.
+type wuHistoryResponse struct {
+	Observations []wuHistoryObservation `json:"observations"`
+}
+
+type wuHistoryObservation struct {
+	StationID    string             `json:"stationID"`
+	ObsTimeUtc   string             `json:"obsTimeUtc"`
+	Epoch        *int64             `json:"epoch"`
+	HumidityAvg  *float64           `json:"humidityAvg"`
+	WindDirAvg   *int               `json:"winddirAvg"`
+	SolarRadHigh *float64           `json:"solarRadiationHigh"`
+	UVHigh       *float64           `json:"uvHigh"`
+	Imperial     *wuHistoryImperial `json:"imperial"`
+}
+
+type wuHistoryImperial struct {
+	TempAvg      *float64 `json:"tempAvg"`
+	HeatIndexAvg *float64 `json:"heatindexAvg"`
+	DewPtAvg     *float64 `json:"dewptAvg"`
+	WindChillAvg *float64 `json:"windchillAvg"`
+	WindSpeedAvg *float64 `json:"windspeedAvg"`
+	WindGustAvg  *float64 `json:"windgustAvg"`
+	PressureMax  *float64 `json:"pressureMax"`
+	PrecipRate   *float64 `json:"precipRate"`
+	PrecipTotal  *float64 `json:"precipTotal"`
+}
+
 func (o *wuObservation) toObservation() *Observation {
 	obs := &Observation{}
 	if o.Epoch != nil {
@@ -152,6 +180,54 @@ func (o *wuObservation) toObservation() *Observation {
 		}
 		if imp.Pressure != nil {
 			obs.Pressure = *imp.Pressure
+		}
+		if imp.PrecipRate != nil {
+			obs.PrecipRate = *imp.PrecipRate
+		}
+		if imp.PrecipTotal != nil {
+			obs.PrecipTotal = *imp.PrecipTotal
+		}
+	}
+	return obs
+}
+
+func (o *wuHistoryObservation) toObservation() *Observation {
+	obs := &Observation{}
+	if o.Epoch != nil {
+		obs.Timestamp = *o.Epoch
+	}
+	if o.HumidityAvg != nil {
+		obs.Humidity = *o.HumidityAvg
+	}
+	if o.WindDirAvg != nil {
+		obs.WindDir = *o.WindDirAvg
+	}
+	if o.SolarRadHigh != nil {
+		obs.SolarRadiation = *o.SolarRadHigh
+	}
+	if o.UVHigh != nil {
+		obs.UV = *o.UVHigh
+	}
+	if imp := o.Imperial; imp != nil {
+		if imp.TempAvg != nil {
+			obs.Temp = *imp.TempAvg
+		}
+		if imp.HeatIndexAvg != nil {
+			obs.FeelsLike = *imp.HeatIndexAvg
+		} else if imp.WindChillAvg != nil {
+			obs.FeelsLike = *imp.WindChillAvg
+		}
+		if imp.DewPtAvg != nil {
+			obs.DewPoint = *imp.DewPtAvg
+		}
+		if imp.WindSpeedAvg != nil {
+			obs.WindSpeed = *imp.WindSpeedAvg
+		}
+		if imp.WindGustAvg != nil {
+			obs.WindGust = *imp.WindGustAvg
+		}
+		if imp.PressureMax != nil {
+			obs.Pressure = *imp.PressureMax
 		}
 		if imp.PrecipRate != nil {
 			obs.PrecipRate = *imp.PrecipRate
