@@ -7,10 +7,41 @@ const isHistory = document.getElementById('temp-chart') !== null;
 
 if (isDashboard) {
     // Auto-refresh image every 30 seconds
-    setInterval(() => {
-        const img = document.getElementById('live-image');
-        img.src = '/images/current.jpg?' + Date.now();
-    }, 30000);
+    let fullscreenOpen = false;
+
+    function refreshImage() {
+        const cacheBust = '?' + Date.now();
+        document.getElementById('live-image').src = '/images/current.jpg' + cacheBust;
+        const timeStr = new Date().toLocaleString([], { hour: 'numeric', minute: '2-digit' });
+        document.getElementById('image-time').textContent = timeStr;
+        if (fullscreenOpen) {
+            document.getElementById('fullscreen-image').src = '/images/current.jpg' + cacheBust;
+            document.getElementById('fullscreen-time').textContent = timeStr;
+        }
+    }
+    refreshImage();
+    setInterval(refreshImage, 30000);
+
+    // Fullscreen image overlay
+    function openImageFullscreen() {
+        const overlay = document.getElementById('fullscreen-overlay');
+        const cacheBust = '?' + Date.now();
+        document.getElementById('fullscreen-image').src = '/images/current.jpg' + cacheBust;
+        document.getElementById('fullscreen-time').textContent =
+            document.getElementById('image-time').textContent;
+        overlay.classList.remove('hidden');
+        overlay.classList.add('flex');
+        fullscreenOpen = true;
+    }
+    window.openImageFullscreen = openImageFullscreen;
+
+    function closeImageFullscreen() {
+        const overlay = document.getElementById('fullscreen-overlay');
+        overlay.classList.add('hidden');
+        overlay.classList.remove('flex');
+        fullscreenOpen = false;
+    }
+    window.closeImageFullscreen = closeImageFullscreen;
 
     // Convert wind degrees to 16-point cardinal direction
     function degreesToCardinal(deg) {
@@ -43,7 +74,8 @@ if (isDashboard) {
             document.getElementById('wind-arrow').setAttribute('transform', 'rotate(' + obs.windDir + ' 60 60)');
 
             const time = new Date(obs.timestamp * 1000);
-            document.getElementById('image-time').textContent = 'Last updated: ' + time.toLocaleString();
+            document.getElementById('obs-time').textContent =
+                'as of ' + time.toLocaleString([], { hour: 'numeric', minute: '2-digit' });
         } catch (e) {
             console.error('Failed to fetch conditions:', e);
         }
@@ -354,7 +386,10 @@ function closePopup() {
     document.getElementById('image-popup').classList.remove('show');
 }
 
-// Close popup on Escape key
+// Close popups on Escape key
 document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closePopup();
+    if (e.key === 'Escape') {
+        if (typeof closePopup === 'function') closePopup();
+        if (typeof closeImageFullscreen === 'function') closeImageFullscreen();
+    }
 });
