@@ -70,6 +70,12 @@ func InitDB(dbPath string) *sql.DB {
 	if err != nil {
 		log.Fatalf("Failed to open database %s: %v", dbPath, err)
 	}
+	// SQLite only supports one concurrent writer. Limiting to a single
+	// connection serialises all access and avoids SQLITE_BUSY errors from
+	// the backfill, image-capture, and weather-poll goroutines competing
+	// for the write lock. It also guarantees the PRAGMAs below stay in
+	// effect (they are per-connection).
+	db.SetMaxOpenConns(1)
 	// Enable WAL mode for better concurrent read/write performance.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		log.Fatalf("Failed to set WAL mode: %v", err)
