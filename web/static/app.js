@@ -5,6 +5,33 @@
 const isDashboard = document.getElementById('live-image') !== null;
 const isHistory = document.getElementById('temp-chart') !== null;
 
+// Fields where 0 indicates missing sensor data, not a real reading.
+const ZERO_IS_NULL = new Set(['temp', 'dewPoint', 'feelsLike', 'pressure']);
+
+// Build {x, y} point array for Chart.js, converting implausible zeros to null.
+// Using {x, y} objects (instead of a labels array) is required for spanGaps
+// with a millisecond threshold to work on time-scale axes.
+function prepareChartData(obs, field) {
+    return obs.map(o => ({
+        x: new Date(o.timestamp * 1000),
+        y: (ZERO_IS_NULL.has(field) && o[field] === 0) ? null : o[field],
+    }));
+}
+
+// Build a continuous cumulative precipitation series across daily resets.
+// The WU API's precipTotal resets to 0 at midnight; this detects those drops
+// and carries over the prior day's total so the line only goes up.
+function cumulativePrecipData(obs) {
+    let offset = 0;
+    let prev = 0;
+    return obs.map(o => {
+        const val = o.precipTotal;
+        if (val < prev) offset += prev;
+        prev = val;
+        return { x: new Date(o.timestamp * 1000), y: offset + val };
+    });
+}
+
 if (isDashboard) {
     // Auto-refresh image every 30 seconds
     let fullscreenOpen = false;
@@ -97,19 +124,19 @@ if (isDashboard) {
             new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: obs.map(o => new Date(o.timestamp * 1000)),
                     datasets: [{
                         label: 'Temp (\u00B0F)',
-                        data: obs.map(o => o.temp),
+                        data: prepareChartData(obs, 'temp'),
                         borderColor: '#ef4444',
                         backgroundColor: 'rgba(239,68,68,0.1)',
                         fill: true,
                         tension: 0.3,
                         pointRadius: 0,
                         borderWidth: 2,
+                        spanGaps: 900000,
                     }, {
                         label: 'Rain (in/hr)',
-                        data: obs.map(o => o.precipRate),
+                        data: prepareChartData(obs, 'precipRate'),
                         borderColor: '#3b82f6',
                         backgroundColor: 'rgba(59,130,246,0.2)',
                         fill: true,
@@ -117,6 +144,7 @@ if (isDashboard) {
                         pointRadius: 0,
                         borderWidth: 1,
                         yAxisID: 'y1',
+                        spanGaps: 900000,
                     }]
                 },
                 options: {
@@ -247,7 +275,6 @@ function renderHistoryCharts(obs) {
     historyCharts.forEach(c => c.destroy());
     historyCharts = [];
 
-    const labels = obs.map(o => new Date(o.timestamp * 1000));
     function fmtTime(date) {
         return date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     }
@@ -278,9 +305,12 @@ function renderHistoryCharts(obs) {
         },
         onClick: (e, elements) => {
             if (elements.length > 0) {
-                const idx = elements[0].index;
-                const ts = obs[idx].timestamp;
-                showImagePopup(ts, obs[idx]);
+                const pt = e.chart.data.datasets[elements[0].datasetIndex].data[elements[0].index];
+                if (pt && pt.x) {
+                    const ts = Math.floor(pt.x.getTime() / 1000);
+                    const match = obs.find(o => o.timestamp === ts);
+                    if (match) showImagePopup(ts, match);
+                }
             }
         }
     };
@@ -289,13 +319,14 @@ function renderHistoryCharts(obs) {
     historyCharts.push(new Chart(document.getElementById('temp-chart'), {
         type: 'line',
         data: {
-            labels,
             datasets: [{
-                label: 'Temp (\u00B0F)', data: obs.map(o => o.temp),
+                label: 'Temp (\u00B0F)', data: prepareChartData(obs, 'temp'),
                 borderColor: '#ef4444', pointRadius: 0, borderWidth: 2, tension: 0.3,
+                spanGaps: 900000,
             }, {
-                label: 'Dew Point (\u00B0F)', data: obs.map(o => o.dewPoint),
+                label: 'Dew Point (\u00B0F)', data: prepareChartData(obs, 'dewPoint'),
                 borderColor: '#65a30d', pointRadius: 0, borderWidth: 2, tension: 0.3,
+                spanGaps: 900000,
             }]
         },
         options: commonOpts,
@@ -305,12 +336,12 @@ function renderHistoryCharts(obs) {
     historyCharts.push(new Chart(document.getElementById('wind-chart'), {
         type: 'line',
         data: {
-            labels,
             datasets: [{
-                label: 'Wind (mph)', data: obs.map(o => o.windSpeed),
+                label: 'Wind (mph)', data: prepareChartData(obs, 'windSpeed'),
                 borderColor: '#3b82f6', pointRadius: 0, borderWidth: 2, tension: 0.3,
+                spanGaps: 900000,
             }, {
-                label: 'Gusts (mph)', data: obs.map(o => o.windGust),
+                label: 'Gusts (mph)', data: prepareChartData(obs, 'windGust'),
                 borderColor: '#f97316', pointRadius: 1, pointBackgroundColor: '#f97316',
                 borderWidth: 0, showLine: false,
             }]
@@ -322,16 +353,16 @@ function renderHistoryCharts(obs) {
     historyCharts.push(new Chart(document.getElementById('precip-chart'), {
         type: 'line',
         data: {
-            labels,
             datasets: [{
-                label: 'Precip Rate (in/hr)', data: obs.map(o => o.precipRate),
+                label: 'Precip Rate (in/hr)', data: prepareChartData(obs, 'precipRate'),
                 borderColor: '#65a30d', backgroundColor: 'rgba(101,163,13,0.2)',
                 fill: true, pointRadius: 0, borderWidth: 1, tension: 0.3,
+                spanGaps: 900000,
             }, {
-                label: 'Precip Total (in)', data: obs.map(o => o.precipTotal),
+                label: 'Precip Total (in)', data: cumulativePrecipData(obs),
                 borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)',
                 fill: true, pointRadius: 0, borderWidth: 2, tension: 0.3,
-                yAxisID: 'y1',
+                yAxisID: 'y1', spanGaps: 900000,
             }]
         },
         options: {
@@ -347,10 +378,10 @@ function renderHistoryCharts(obs) {
     historyCharts.push(new Chart(document.getElementById('pressure-chart'), {
         type: 'line',
         data: {
-            labels,
             datasets: [{
-                label: 'Pressure (inHg)', data: obs.map(o => o.pressure),
+                label: 'Pressure (inHg)', data: prepareChartData(obs, 'pressure'),
                 borderColor: '#8b5cf6', pointRadius: 0, borderWidth: 2, tension: 0.3,
+                spanGaps: 900000,
             }]
         },
         options: commonOpts,
