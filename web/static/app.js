@@ -91,11 +91,18 @@ if (isDashboard) {
                     responsive: true,
                     maintainAspectRatio: false,
                     interaction: { intersect: false, mode: 'index' },
-                    plugins: { legend: { labels: { color: '#9ca3af', font: { size: 11 } } } },
+                    plugins: {
+                        legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
+                        tooltip: {
+                            callbacks: {
+                                title: (items) => items.length ? new Date(items[0].parsed.x).toLocaleString([], { hour: 'numeric', minute: '2-digit' }) : '',
+                            },
+                        },
+                    },
                     scales: {
                         x: {
                             type: 'time',
-                            time: { unit: 'hour', displayFormats: { hour: 'ha' } },
+                            time: { unit: 'hour', displayFormats: { hour: 'ha', minute: 'h:mm a' } },
                             ticks: { color: '#6b7280' },
                             grid: { color: 'rgba(75,85,99,0.3)' },
                         },
@@ -124,11 +131,28 @@ if (isDashboard) {
 // ---------------------------------------------------------------------------
 
 let historyCharts = [];
+let currentFrom = 0, currentTo = 0;
 
-function loadRange(days) {
-    // Highlight active button
+function setActiveButton(el) {
     document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
-    event.target.classList.add('active');
+    if (el) el.classList.add('active');
+}
+
+function updateURL(params) {
+    const url = new URL(window.location);
+    url.search = '';
+    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    history.replaceState(null, '', url);
+}
+
+function showLockButton(visible) {
+    document.getElementById('lock-btn').classList.toggle('hidden', !visible);
+}
+
+function loadRange(days, btn) {
+    setActiveButton(btn || document.querySelector(`.range-btn[data-range="${days}"]`));
+    updateURL({ range: days });
+    showLockButton(true);
 
     const now = Math.floor(Date.now() / 1000);
     const from = now - days * 86400;
@@ -141,11 +165,41 @@ function loadCustomRange() {
     if (!from || !to) return;
     const fromTs = Math.floor(new Date(from).getTime() / 1000);
     const toTs = Math.floor(new Date(to + 'T23:59:59').getTime() / 1000);
+    setActiveButton(null);
+    updateURL({ from: fromTs, to: toTs });
+    showLockButton(false);
     loadObservations(fromTs, toTs);
+}
+
+function lockRange() {
+    updateURL({ from: currentFrom, to: currentTo });
+    setActiveButton(null);
+    // Fill the date inputs to reflect the locked range
+    document.getElementById('date-from').value = new Date(currentFrom * 1000).toISOString().slice(0, 10);
+    document.getElementById('date-to').value = new Date(currentTo * 1000).toISOString().slice(0, 10);
+    showLockButton(false);
+}
+
+function initHistoryFromURL() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('from') && params.has('to')) {
+        const from = parseInt(params.get('from'));
+        const to = parseInt(params.get('to'));
+        document.getElementById('date-from').value = new Date(from * 1000).toISOString().slice(0, 10);
+        document.getElementById('date-to').value = new Date(to * 1000).toISOString().slice(0, 10);
+        setActiveButton(null);
+        showLockButton(false);
+        loadObservations(from, to);
+    } else {
+        const range = parseInt(params.get('range')) || 7;
+        loadRange(range);
+    }
 }
 
 async function loadObservations(from, to) {
     if (!isHistory) return;
+    currentFrom = from;
+    currentTo = to;
     try {
         const resp = await fetch(`/api/observations?from=${from}&to=${to}`);
         const data = await resp.json();
@@ -162,16 +216,26 @@ function renderHistoryCharts(obs) {
     historyCharts = [];
 
     const labels = obs.map(o => new Date(o.timestamp * 1000));
+    function fmtTime(date) {
+        return date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+
     const commonOpts = {
         responsive: true,
         maintainAspectRatio: false,
         interaction: { intersect: false, mode: 'index' },
         plugins: {
             legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
+            tooltip: {
+                callbacks: {
+                    title: (items) => items.length ? fmtTime(new Date(items[0].parsed.x)) : '',
+                },
+            },
         },
         scales: {
             x: {
                 type: 'time',
+                time: { tooltipFormat: '', displayFormats: { hour: 'ha', day: 'MMM d', minute: 'h:mm a' } },
                 ticks: { color: '#6b7280', maxTicksLimit: 12 },
                 grid: { color: 'rgba(75,85,99,0.3)' },
             },

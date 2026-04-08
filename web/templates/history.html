@@ -23,13 +23,16 @@
 
     <main class="max-w-7xl mx-auto px-4 py-6">
         <!-- Range picker -->
-        <div class="flex flex-wrap gap-2 mb-6">
-            <button onclick="loadRange(1)" class="range-btn px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm">24h</button>
-            <button onclick="loadRange(7)" class="range-btn px-3 py-1 rounded bg-blue-600 text-sm">7 days</button>
-            <button onclick="loadRange(30)" class="range-btn px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm">30 days</button>
+        <div class="flex flex-wrap gap-2 mb-6 items-center">
+            <button onclick="loadRange(1, this)" class="range-btn px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm" data-range="1">24h</button>
+            <button onclick="loadRange(7, this)" class="range-btn px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm" data-range="7">7 days</button>
+            <button onclick="loadRange(30, this)" class="range-btn px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm" data-range="30">30 days</button>
+            <span class="text-gray-600 mx-1">|</span>
             <input type="date" id="date-from" class="bg-gray-700 rounded px-2 py-1 text-sm">
             <input type="date" id="date-to" class="bg-gray-700 rounded px-2 py-1 text-sm">
             <button onclick="loadCustomRange()" class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm">Go</button>
+            <span class="text-gray-600 mx-1">|</span>
+            <button onclick="lockRange()" id="lock-btn" class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm hidden" title="Snapshot current view as a shareable link">Lock</button>
         </div>
 
         <!-- Charts -->
@@ -63,8 +66,7 @@
 
     <script src="/static/app.js"></script>
     <script>
-        // Initialize history page with 7-day view
-        document.addEventListener('DOMContentLoaded', () => loadRange(7));
+        document.addEventListener('DOMContentLoaded', () => initHistoryFromURL());
     </script>
 </body>
 </html>
