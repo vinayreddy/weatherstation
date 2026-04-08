@@ -57,21 +57,50 @@ func (ws *WeatherStationServer) weatherPollLoop() {
 }
 
 func (ws *WeatherStationServer) fetchAndStoreWeather() {
-	today := time.Now().Format("20060102")
-	observations, err := ws.wu.FetchHistory(today)
+	// Fetch real-time current reading.
+	obs, err := ws.wu.FetchCurrent()
 	if err != nil {
-		slog.Error("failed to fetch weather history", "err", err)
+		slog.Error("failed to fetch weather", "err", err)
+		return
+	}
+	if err := InsertObservation(ws.db, obs); err != nil {
+		slog.Error("failed to store observation", "err", err)
+		return
+	}
+	slog.Info("weather updated",
+		"temp", obs.Temp,
+		"humidity", obs.Humidity,
+		"wind", obs.WindSpeed,
+		"precip", obs.PrecipRate)
+
+	// Backfill 2 days ago (once per day) to capture all data points the
+	// station reported that we missed by only polling every 5 minutes.
+	ws.maybeBackfillRecent()
+}
+
+var lastBackfillDate string
+
+func (ws *WeatherStationServer) maybeBackfillRecent() {
+	twoDaysAgo := time.Now().AddDate(0, 0, -2).Format("20060102")
+	if twoDaysAgo == lastBackfillDate {
+		return
+	}
+
+	observations, err := ws.wu.FetchHistory(twoDaysAgo)
+	if err != nil {
+		slog.Error("failed to backfill recent history", "date", twoDaysAgo, "err", err)
 		return
 	}
 	inserted := 0
 	for i := range observations {
 		if err := InsertObservation(ws.db, &observations[i]); err != nil {
-			slog.Error("failed to store observation", "err", err)
+			slog.Error("failed to store backfill observation", "err", err)
 			continue
 		}
 		inserted++
 	}
-	slog.Info("weather updated", "date", today, "fetched", len(observations), "inserted", inserted)
+	lastBackfillDate = twoDaysAgo
+	slog.Info("backfilled recent history", "date", twoDaysAgo, "inserted", inserted)
 }
 
 // captureAndOverlay captures an RTSP frame, overlays weather data, and saves it.
