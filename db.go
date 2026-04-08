@@ -74,6 +74,10 @@ func InitDB(dbPath string) *sql.DB {
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		log.Fatalf("Failed to set WAL mode: %v", err)
 	}
+	// Wait up to 5s for locks to clear instead of failing immediately with SQLITE_BUSY.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		log.Fatalf("Failed to set busy timeout: %v", err)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		log.Fatalf("Failed to create schema: %v", err)
 	}
