@@ -46,6 +46,9 @@ func (ws *WeatherStationServer) backgroundLoop() {
 
 // weatherPollLoop fetches weather data from WU every 5 minutes and stores it in SQLite.
 func (ws *WeatherStationServer) weatherPollLoop() {
+	// Backfill today's history on startup to fill gaps from any downtime.
+	ws.backfillToday()
+
 	// Fetch immediately on startup
 	ws.fetchAndStoreWeather()
 
@@ -101,6 +104,24 @@ func (ws *WeatherStationServer) maybeBackfillRecent() {
 	}
 	lastBackfillDate = twoDaysAgo
 	slog.Info("backfilled recent history", "date", twoDaysAgo, "inserted", inserted)
+}
+
+func (ws *WeatherStationServer) backfillToday() {
+	today := time.Now().Format("20060102")
+	observations, err := ws.wu.FetchHistory(today)
+	if err != nil {
+		slog.Error("failed to backfill today", "err", err)
+		return
+	}
+	inserted := 0
+	for i := range observations {
+		if err := InsertObservation(ws.db, &observations[i]); err != nil {
+			slog.Error("failed to store observation", "err", err)
+			continue
+		}
+		inserted++
+	}
+	slog.Info("backfilled today on startup", "date", today, "fetched", len(observations), "inserted", inserted)
 }
 
 // captureAndOverlay captures an RTSP frame, overlays weather data, and saves it.
