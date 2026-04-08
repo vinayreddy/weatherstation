@@ -6,6 +6,11 @@
     background-color: rgb(55 65 81);
 }
 
+/* Wind compass arrow smooth rotation */
+#wind-arrow {
+    transition: transform 0.5s ease;
+}
+
 /* Image popup animation */
 #image-popup {
     transition: opacity 0.2s;

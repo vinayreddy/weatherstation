@@ -12,6 +12,13 @@ if (isDashboard) {
         img.src = '/images/current.jpg?' + Date.now();
     }, 30000);
 
+    // Convert wind degrees to 16-point cardinal direction
+    function degreesToCardinal(deg) {
+        const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE',
+                      'S','SSW','SW','WSW','W','WNW','NW','NNW'];
+        return dirs[Math.round(deg / 22.5) % 16];
+    }
+
     // Fetch and display current conditions
     async function updateConditions() {
         try {
@@ -22,13 +29,18 @@ if (isDashboard) {
 
             document.getElementById('temp').textContent = Math.round(obs.temp) + '\u00B0F';
             document.getElementById('feels-like').textContent = Math.round(obs.feelsLike) + '\u00B0F';
+            document.getElementById('dew-point').textContent = Math.round(obs.dewPoint) + '\u00B0F';
+            document.getElementById('humidity').textContent = Math.round(obs.humidity) + '%';
             document.getElementById('wind').textContent = Math.round(obs.windSpeed) + ' mph';
             document.getElementById('wind-gust').textContent = Math.round(obs.windGust) + ' mph';
-            document.getElementById('humidity').textContent = Math.round(obs.humidity) + '%';
-            document.getElementById('pressure').textContent = obs.pressure.toFixed(2);
+            document.getElementById('pressure').textContent = obs.pressure.toFixed(2) + ' in';
             document.getElementById('precip-rate').textContent = obs.precipRate.toFixed(2) + ' in/hr';
             document.getElementById('uv').textContent = obs.uv.toFixed(1);
-            document.getElementById('dew-point').textContent = Math.round(obs.dewPoint) + '\u00B0F';
+
+            // Wind compass
+            const cardinal = degreesToCardinal(obs.windDir);
+            document.getElementById('wind-dir-label').textContent = cardinal;
+            document.getElementById('wind-arrow').setAttribute('transform', 'rotate(' + obs.windDir + ' 60 60)');
 
             const time = new Date(obs.timestamp * 1000);
             document.getElementById('image-time').textContent = 'Last updated: ' + time.toLocaleString();
