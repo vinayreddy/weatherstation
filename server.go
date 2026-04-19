@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -140,11 +141,20 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 		return Wrap(err, "creating image directory")
 	}
 
-	// Capture RTSP frame
-	ffmpegCmd := fmt.Sprintf(
-		"ffmpeg -y -rtsp_transport tcp -i %s -qscale:v 3 -frames:v 1 %s",
-		ws.config.RTSPStream, absPath)
-	cmd := exec.Command("bash", "-c", ffmpegCmd)
+	// Capture RTSP frame. CommandContext guarantees we don't wedge forever
+	// if the RTSP stream stalls mid-read; -rw_timeout makes ffmpeg itself
+	// bail on stalled sockets first so we rarely need the SIGKILL path.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-y",
+		"-rtsp_transport", "tcp",
+		"-rw_timeout", "15000000",
+		"-i", ws.config.RTSPStream,
+		"-qscale:v", "3",
+		"-frames:v", "1",
+		absPath)
+	cmd.WaitDelay = 5 * time.Second
 	cmdOutput, err := cmd.CombinedOutput()
 	if err != nil {
 		err = Wrapf(err, "%s", string(cmdOutput))
