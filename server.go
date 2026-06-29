@@ -195,7 +195,7 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 		timeStr := now.Format("2006-01-02   3:04PM")
 		addTimeCmd := fmt.Sprintf(
 			`convert %s `+overlayStyleArgs+` `+
-				`-annotate +20+5 '%v' %s`,
+				`-annotate +20+5 ' %v ' %s`,
 			absPath, timeStr, currentPath)
 		cmd = exec.Command("bash", "-c", addTimeCmd)
 		cmdOutput, innerErr := cmd.CombinedOutput()
@@ -224,11 +224,11 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 	lineHeight := 60
 	imageMagickCmd := fmt.Sprintf(
 		`convert %s `+overlayStyleArgs+` `+
-			`-annotate +20+5 '%v' `+
-			`-annotate +20+%d 'Temp: %.0fF (feels-like %.0fF)' `+
-			`-annotate +20+%d 'Wind: %.0f mph (Gusts: %.0f mph)' `+
-			`-annotate +20+%d 'Humidity: %.0f%%  Rain: %.2f in/hr' `+
-			`-annotate +20+%d 'Pressure: %.2f inHg' %s`,
+			`-annotate +20+5 ' %v ' `+
+			`-annotate +20+%d ' Temp: %.0fF (feels-like %.0fF) ' `+
+			`-annotate +20+%d ' Wind: %.0f mph (Gusts: %.0f mph) ' `+
+			`-annotate +20+%d ' Humidity: %.0f%%  Rain: %.2f in/hr ' `+
+			`-annotate +20+%d ' Pressure: %.2f inHg ' %s`,
 		absPath, timeStr,
 		5+lineHeight, temp, feelsLike,
 		5+2*lineHeight, wind, windGust,

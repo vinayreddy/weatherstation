@@ -47,12 +47,12 @@
     <div id="lightbox" class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50" onclick="closeLightbox()">
         <button onclick="event.stopPropagation(); lbStep(-1)" class="absolute left-2 sm:left-6 text-white/70 hover:text-white text-4xl px-3 py-2 select-none">&lsaquo;</button>
         <div class="max-w-5xl w-full mx-12" onclick="event.stopPropagation()">
-            <img id="lb-image" src="" class="w-full rounded-lg shadow-2xl">
+            <img id="lb-image" src="" class="w-full max-h-[78vh] object-contain bg-black rounded-lg shadow-2xl">
             <div class="flex items-center justify-center gap-4 mt-3">
                 <button onclick="togglePlay()" id="lb-play" class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm">&#9654; Play</button>
                 <span class="text-sm text-gray-300" id="lb-caption"></span>
             </div>
-            <div class="text-center text-sm text-gray-200 mt-2" id="lb-weather"></div>
+            <div class="text-center text-sm text-gray-200 mt-2 min-h-[2.5rem]" id="lb-weather"></div>
         </div>
         <button onclick="event.stopPropagation(); lbStep(1)" class="absolute right-2 sm:right-6 text-white/70 hover:text-white text-4xl px-3 py-2 select-none">&rsaquo;</button>
     </div>
