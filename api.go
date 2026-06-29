@@ -139,6 +139,27 @@ func NewAPIMux(wss *WeatherStationServer) http.Handler {
 		writeJSON(w, img)
 	})
 
+	// Weather observation nearest a timestamp, for captions on historical images
+	// (stored frames are raw — no burned-in overlay). Within ±30 min.
+	mux.HandleFunc("GET /api/nearest-observation", func(w http.ResponseWriter, r *http.Request) {
+		ts, _ := strconv.ParseInt(r.URL.Query().Get("ts"), 10, 64)
+		if ts == 0 {
+			http.Error(w, "ts parameter required", 400)
+			return
+		}
+		obs, err := NearestObservation(wss.db, ts, 1800)
+		if err != nil {
+			slog.Error("nearest observation failed", "err", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		if obs == nil {
+			http.Error(w, "no observation found", 404)
+			return
+		}
+		writeJSON(w, obs)
+	})
+
 	// Top "most interesting" frames, deduplicated into events. Params: from, to
 	// (unix), category (optional filter), limit (default 60).
 	mux.HandleFunc("GET /api/highlights", func(w http.ResponseWriter, r *http.Request) {

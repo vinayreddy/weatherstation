@@ -20,6 +20,12 @@
     opacity: 1;
 }
 
+/* Viewer / Highlights lightbox is shown by toggling .show; this overrides the
+   Tailwind `hidden` (display:none) it carries by default. */
+#lightbox.show {
+    display: flex;
+}
+
 /* Active range button */
 .range-btn.active {
     background-color: rgb(37 99 235);

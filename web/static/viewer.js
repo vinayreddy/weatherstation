@@ -26,6 +26,24 @@ function fmtClock(ts) {
     { timeZone: PT, hour: 'numeric', minute: '2-digit' });
 }
 
+// fmtWeather renders an observation as a compact one-line summary. 0 is treated
+// as "missing" for temp/feels-like/pressure (matches the dashboard's ZERO_IS_NULL).
+function fmtWeather(o) {
+  const parts = [];
+  if (o.temp) {
+    let t = `${Math.round(o.temp)}°F`;
+    if (o.feelsLike && Math.round(o.feelsLike) !== Math.round(o.temp)) t += ` (feels ${Math.round(o.feelsLike)}°)`;
+    parts.push(t);
+  }
+  parts.push(`💧 ${Math.round(o.humidity)}%`);
+  let wind = `💨 ${Math.round(o.windSpeed)}`;
+  if (o.windGust > o.windSpeed) wind += `–${Math.round(o.windGust)}`;
+  parts.push(`${wind} mph`);
+  if (o.pressure) parts.push(`${o.pressure.toFixed(2)} inHg`);
+  if (o.precipRate > 0) parts.push(`🌧 ${o.precipRate.toFixed(2)} in/hr`);
+  return parts.join('  ·  ');
+}
+
 // --- controls ----------------------------------------------------------------
 
 function currentDate() { return document.getElementById('viewer-date').value || todayPT(); }
@@ -113,6 +131,21 @@ function renderLightbox() {
   if (img.category && img.detail) caption += ` · ${img.detail}`;
   document.getElementById('lb-caption').textContent =
     `${caption}   (${lbIndex + 1}/${images.length})`;
+  loadLightboxWeather(img.timestamp);
+}
+
+// Stored frames are raw (no burned-in overlay), so show the weather from that
+// time as a caption, fetched per image. Ignores a stale response if the user
+// has already navigated to a different frame.
+async function loadLightboxWeather(ts) {
+  const el = document.getElementById('lb-weather');
+  el.textContent = '';
+  try {
+    const res = await fetch(`/api/nearest-observation?ts=${ts}`);
+    if (!res.ok) return;
+    const o = await res.json();
+    if (images[lbIndex] && images[lbIndex].timestamp === ts) el.textContent = fmtWeather(o);
+  } catch (e) { /* leave blank */ }
 }
 function lbStep(n) {
   if (!images.length) return;

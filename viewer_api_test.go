@@ -108,6 +108,32 @@ func TestAPIImagesStepDownsample(t *testing.T) {
 	}
 }
 
+func TestAPINearestObservation(t *testing.T) {
+	wss, mux := newTestServer(t)
+	now := time.Now().Unix()
+	InsertObservation(wss.db, &Observation{Timestamp: now - 600, Temp: 50, WindSpeed: 5})
+	InsertObservation(wss.db, &Observation{Timestamp: now, Temp: 58, WindSpeed: 9})
+
+	// Within the ±30min window: nearest to now-120 is the `now` observation.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/nearest-observation?ts="+itoa(now-120), nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var o Observation
+	json.NewDecoder(rec.Body).Decode(&o)
+	if o.Temp != 58 {
+		t.Errorf("nearest temp = %v, want 58", o.Temp)
+	}
+
+	// Far from any observation (>30min): 404, not a stale match.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/nearest-observation?ts="+itoa(now+99999), nil))
+	if rec.Code != 404 {
+		t.Errorf("far-away status = %d, want 404", rec.Code)
+	}
+}
+
 func TestThumb(t *testing.T) {
 	wss, mux := newTestServer(t)
 	ts := time.Now().In(ptLocation).Unix()

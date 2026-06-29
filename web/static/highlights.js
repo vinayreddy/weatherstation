@@ -23,6 +23,24 @@ function fmtDateTime(ts) {
     { timeZone: PT, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+// fmtWeather renders an observation as a compact one-line summary. 0 is treated
+// as "missing" for temp/feels-like/pressure (matches the dashboard's ZERO_IS_NULL).
+function fmtWeather(o) {
+  const parts = [];
+  if (o.temp) {
+    let t = `${Math.round(o.temp)}°F`;
+    if (o.feelsLike && Math.round(o.feelsLike) !== Math.round(o.temp)) t += ` (feels ${Math.round(o.feelsLike)}°)`;
+    parts.push(t);
+  }
+  parts.push(`💧 ${Math.round(o.humidity)}%`);
+  let wind = `💨 ${Math.round(o.windSpeed)}`;
+  if (o.windGust > o.windSpeed) wind += `–${Math.round(o.windGust)}`;
+  parts.push(`${wind} mph`);
+  if (o.pressure) parts.push(`${o.pressure.toFixed(2)} inHg`);
+  if (o.precipRate > 0) parts.push(`🌧 ${o.precipRate.toFixed(2)} in/hr`);
+  return parts.join('  ·  ');
+}
+
 function makeCard(item) {
   const idx = shown.length;
   shown.push(item);
@@ -113,6 +131,19 @@ function renderLightbox() {
   const tag = cat ? `${cat.icon} ${cat.label}` : '';
   document.getElementById('lb-caption').textContent =
     `${tag} · ${item.detail || ''} · ${fmtDateTime(item.timestamp)}`;
+  loadLightboxWeather(item.timestamp);
+}
+
+// Show the weather nearest this frame's capture time (frames are raw images).
+async function loadLightboxWeather(ts) {
+  const el = document.getElementById('lb-weather');
+  el.textContent = '';
+  try {
+    const res = await fetch(`/api/nearest-observation?ts=${ts}`);
+    if (!res.ok) return;
+    const o = await res.json();
+    if (shown[lbIndex] && shown[lbIndex].timestamp === ts) el.textContent = fmtWeather(o);
+  } catch (e) { /* leave blank */ }
 }
 function lbStep(n) {
   if (!shown.length) return;
