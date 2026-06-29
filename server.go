@@ -151,6 +151,14 @@ func (ws *WeatherStationServer) backfillRecentDays() {
 const overlayStyleArgs = `-font Helvetica -antialias -gravity NorthWest ` +
 	`-undercolor '#00000059' -fill '#ffffff' -pointsize 50`
 
+// nbsp is a non-breaking space (U+00A0) used to pad overlay lines. A regular
+// leading space does not work: ImageMagick 6 (the Pi's `convert`) drops a
+// *leading* ASCII space when sizing the -undercolor box, so the left padding
+// vanished while a trailing space still widened the box on the right. A
+// non-breaking space survives that trim, giving symmetric left/right breathing
+// room around the text on both IM6 (prod) and IM7 (dev).
+const nbsp = "\u00a0"
+
 // captureAndOverlay captures an RTSP frame, overlays weather data, and saves it.
 func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 	now := ws.clock.NowPacific()
@@ -195,7 +203,7 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 		timeStr := now.Format("2006-01-02   3:04PM")
 		addTimeCmd := fmt.Sprintf(
 			`convert %s `+overlayStyleArgs+` `+
-				`-annotate +20+5 ' %v ' %s`,
+				`-annotate +20+5 '`+nbsp+`%v`+nbsp+`' %s`,
 			absPath, timeStr, currentPath)
 		cmd = exec.Command("bash", "-c", addTimeCmd)
 		cmdOutput, innerErr := cmd.CombinedOutput()
@@ -224,11 +232,11 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 	lineHeight := 60
 	imageMagickCmd := fmt.Sprintf(
 		`convert %s `+overlayStyleArgs+` `+
-			`-annotate +20+5 ' %v ' `+
-			`-annotate +20+%d ' Temp: %.0fF (feels-like %.0fF) ' `+
-			`-annotate +20+%d ' Wind: %.0f mph (Gusts: %.0f mph) ' `+
-			`-annotate +20+%d ' Humidity: %.0f%%  Rain: %.2f in/hr ' `+
-			`-annotate +20+%d ' Pressure: %.2f inHg ' %s`,
+			`-annotate +20+5 '`+nbsp+`%v`+nbsp+`' `+
+			`-annotate +20+%d '`+nbsp+`Temp: %.0fF (feels-like %.0fF)`+nbsp+`' `+
+			`-annotate +20+%d '`+nbsp+`Wind: %.0f mph (Gusts: %.0f mph)`+nbsp+`' `+
+			`-annotate +20+%d '`+nbsp+`Humidity: %.0f%%  Rain: %.2f in/hr`+nbsp+`' `+
+			`-annotate +20+%d '`+nbsp+`Pressure: %.2f inHg`+nbsp+`' %s`,
 		absPath, timeStr,
 		5+lineHeight, temp, feelsLike,
 		5+2*lineHeight, wind, windGust,
