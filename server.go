@@ -26,6 +26,10 @@ func (ws *WeatherStationServer) backgroundLoop() {
 		go ws.weatherPollLoop()
 	}
 
+	// Image storage lifecycle: thin prior days to ~1/hour, archive+evict aged
+	// days, and keep ImageDir under the configured disk budget.
+	go ws.imageLifecycleLoop()
+
 	// Image capture loop
 	var lastAlertDay string
 	for i := int64(0); ; i++ {
@@ -142,14 +146,16 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 	}
 
 	// Capture RTSP frame. CommandContext guarantees we don't wedge forever
-	// if the RTSP stream stalls mid-read; -rw_timeout makes ffmpeg itself
-	// bail on stalled sockets first so we rarely need the SIGKILL path.
+	// if the RTSP stream stalls mid-read; -timeout makes ffmpeg itself bail on
+	// stalled sockets first so we rarely need the SIGKILL path. (-timeout is the
+	// rtsp socket I/O timeout in microseconds; it is accepted across ffmpeg
+	// versions, whereas -rw_timeout is rejected by older builds e.g. ffmpeg 5.0.)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-y",
 		"-rtsp_transport", "tcp",
-		"-rw_timeout", "15000000",
+		"-timeout", "15000000",
 		"-i", ws.config.RTSPStream,
 		"-qscale:v", "3",
 		"-frames:v", "1",

@@ -14,7 +14,7 @@ LDFLAGS = -ldflags "\
 	-X '$(PKG).GitCommit=$(GIT_COMMIT)' \
 	-X '$(PKG).GitBranch=$(GIT_BRANCH)'"
 
-.PHONY: build build-raspi build-all clean test deps
+.PHONY: build build-raspi build-pi32 build-all clean test deps
 
 build:
 	@echo "Building $(BINARY_NAME)..."
@@ -26,7 +26,12 @@ build-raspi:
 	@mkdir -p bin
 	@GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o bin/$(BINARY_NAME)-linux-arm64 . || { echo "FAILED: GOOS=linux GOARCH=arm64 go build -o bin/$(BINARY_NAME)-linux-arm64 ."; exit 1; }
 
-build-all: build build-raspi
+build-pi32:
+	@echo "Building $(BINARY_NAME)-linux-armv7..."
+	@mkdir -p bin
+	@GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build $(LDFLAGS) -o bin/$(BINARY_NAME)-linux-armv7 . || { echo "FAILED: GOOS=linux GOARCH=arm GOARM=7 go build -o bin/$(BINARY_NAME)-linux-armv7 ."; exit 1; }
+
+build-all: build build-raspi build-pi32
 
 clean:
 	rm -rf bin/

@@ -155,7 +155,7 @@ func InsertImage(db *sql.DB, img *ImageRecord) error {
 
 func QueryImages(db *sql.DB, dayStart, dayEnd int64) ([]ImageRecord, error) {
 	rows, err := db.Query(`SELECT timestamp, path, is_archived, interest_score
-		FROM images WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp`,
+		FROM images WHERE timestamp >= ? AND timestamp < ? AND is_archived = 0 ORDER BY timestamp`,
 		dayStart, dayEnd)
 	if err != nil {
 		return nil, err
@@ -178,7 +178,7 @@ func QueryImages(db *sql.DB, dayStart, dayEnd int64) ([]ImageRecord, error) {
 // NearestImage returns the image closest in time to the given timestamp.
 func NearestImage(db *sql.DB, ts int64) (*ImageRecord, error) {
 	row := db.QueryRow(`SELECT timestamp, path, is_archived, interest_score
-		FROM images ORDER BY ABS(timestamp - ?) LIMIT 1`, ts)
+		FROM images WHERE is_archived = 0 ORDER BY ABS(timestamp - ?) LIMIT 1`, ts)
 	var img ImageRecord
 	var archived int
 	err := row.Scan(&img.Timestamp, &img.Path, &archived, &img.InterestScore)
@@ -232,4 +232,33 @@ func kvGet(db *sql.DB, key string) string {
 
 func kvSet(db *sql.DB, key, value string) {
 	db.Exec("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", key, value)
+}
+
+// DeleteImageByPath removes a single image row by its relative path. Used by
+// thinning, which deletes the file and its row in lockstep.
+func DeleteImageByPath(db *sql.DB, path string) error {
+	_, err := db.Exec(`DELETE FROM images WHERE path = ?`, path)
+	return err
+}
+
+// MarkImagesArchived flags rows in [fromTs, toTs) as archived: their bytes have
+// been pushed to cold storage and the local files deleted, but the rows are kept
+// for the historical timeline.
+func MarkImagesArchived(db *sql.DB, fromTs, toTs int64) (int64, error) {
+	res, err := db.Exec(`UPDATE images SET is_archived = 1
+		WHERE timestamp >= ? AND timestamp < ?`, fromTs, toTs)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// DeleteImagesInRange hard-deletes rows in [fromTs, toTs). Used when no archive
+// destination is configured — the bytes are gone, so the rows should be too.
+func DeleteImagesInRange(db *sql.DB, fromTs, toTs int64) (int64, error) {
+	res, err := db.Exec(`DELETE FROM images WHERE timestamp >= ? AND timestamp < ?`, fromTs, toTs)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

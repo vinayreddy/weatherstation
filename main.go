@@ -76,19 +76,29 @@ type Config struct {
 	MailtrapAPIToken string
 	AlertEmailTo     string
 	AlertEmailFrom   string
+
+	// Image storage lifecycle.
+	ImageDiskLimit         int64  // hard cap on ImageDir size in bytes; <=0 disables
+	ImageRetentionDays     int    // keep this many days locally; older is archived+deleted
+	ImageArchiveDest       string // rsync dest e.g. user@host:/path; "" => delete without archiving
+	ImageArchiveEveryHours int    // cadence (hours) for the retention/archival sweep
 }
 
 var knownEnvVars = map[string]bool{
-	"WS_WU_API_KEY":         true,
-	"WS_WU_STATION_ID":      true,
-	"WS_RTSP_STREAM":        true,
-	"WS_IMAGE_DIR":          true,
-	"WS_DB_PATH":            true,
-	"WS_HTTP_PORT":          true,
-	"WS_REFRESH_SECS":       true,
-	"WS_MAILTRAP_API_TOKEN": true,
-	"WS_ALERT_EMAIL_TO":     true,
-	"WS_ALERT_EMAIL_FROM":   true,
+	"WS_WU_API_KEY":                true,
+	"WS_WU_STATION_ID":             true,
+	"WS_RTSP_STREAM":               true,
+	"WS_IMAGE_DIR":                 true,
+	"WS_DB_PATH":                   true,
+	"WS_HTTP_PORT":                 true,
+	"WS_REFRESH_SECS":              true,
+	"WS_MAILTRAP_API_TOKEN":        true,
+	"WS_ALERT_EMAIL_TO":            true,
+	"WS_ALERT_EMAIL_FROM":          true,
+	"WS_IMAGE_DISK_LIMIT":          true,
+	"WS_IMAGE_RETENTION_DAYS":      true,
+	"WS_IMAGE_ARCHIVE_DEST":        true,
+	"WS_IMAGE_ARCHIVE_EVERY_HOURS": true,
 }
 
 func LoadConfig() *Config {
@@ -103,6 +113,11 @@ func LoadConfig() *Config {
 		MailtrapAPIToken: os.Getenv("WS_MAILTRAP_API_TOKEN"),
 		AlertEmailTo:     os.Getenv("WS_ALERT_EMAIL_TO"),
 		AlertEmailFrom:   getEnv("WS_ALERT_EMAIL_FROM", "weatherstation@localhost"),
+
+		ImageDiskLimit:         getEnvSize("WS_IMAGE_DISK_LIMIT", "5GB"),
+		ImageRetentionDays:     getEnvInt("WS_IMAGE_RETENTION_DAYS", 90),
+		ImageArchiveDest:       os.Getenv("WS_IMAGE_ARCHIVE_DEST"),
+		ImageArchiveEveryHours: getEnvInt("WS_IMAGE_ARCHIVE_EVERY_HOURS", 24),
 	}
 }
 
@@ -190,6 +205,56 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// parseSize parses a human-readable byte size: "5GB", "500MB", "1.5G", or a
+// plain byte count "5368709120". Binary units (1 GB == 1024 MB),
+// case-insensitive, optional space. Suffixes: B, K/KB/KIB, M/MB/MIB, G/GB/GIB,
+// T/TB/TIB.
+func parseSize(s string) (int64, error) {
+	u := strings.ToUpper(strings.TrimSpace(s))
+	if u == "" {
+		return 0, fmt.Errorf("empty size")
+	}
+	i := 0
+	for i < len(u) && (u[i] >= '0' && u[i] <= '9' || u[i] == '.') {
+		i++
+	}
+	num, err := strconv.ParseFloat(strings.TrimSpace(u[:i]), 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad size %q: %w", s, err)
+	}
+	var mult float64
+	switch strings.TrimSpace(u[i:]) {
+	case "", "B":
+		mult = 1
+	case "K", "KB", "KIB":
+		mult = 1 << 10
+	case "M", "MB", "MIB":
+		mult = 1 << 20
+	case "G", "GB", "GIB":
+		mult = 1 << 30
+	case "T", "TB", "TIB":
+		mult = 1 << 40
+	default:
+		return 0, fmt.Errorf("unknown size unit in %q", s)
+	}
+	return int64(num * mult), nil
+}
+
+// getEnvSize reads a human-readable byte size from the environment, falling back
+// to the given default. It fatals on an unparseable value (mirrors the existing
+// fail-fast config style).
+func getEnvSize(key, fallback string) int64 {
+	raw := os.Getenv(key)
+	if raw == "" {
+		raw = fallback
+	}
+	n, err := parseSize(raw)
+	if err != nil {
+		log.Fatalf("invalid %s=%q: %v", key, raw, err)
+	}
+	return n
 }
 
 func versionInfo() string {
