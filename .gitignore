@@ -1,1 +1,8 @@
 bin/
+
+# Compiled binary from `go build .` at the repo root (Makefile builds to bin/).
+/weatherstation
+
+# Local secrets and runtime data (DB, captured images, thumbnail cache).
+.env
+data/

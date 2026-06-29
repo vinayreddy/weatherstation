@@ -18,6 +18,7 @@ type WeatherStationServer struct {
 	al     Alerter
 	db     *sql.DB
 	wu     *WUClient
+	sw     *SpaceWeatherClient
 }
 
 func (ws *WeatherStationServer) backgroundLoop() {
@@ -25,6 +26,14 @@ func (ws *WeatherStationServer) backgroundLoop() {
 	if ws.wu != nil {
 		go ws.weatherPollLoop()
 	}
+
+	// Space-weather polling (NOAA SWPC Kp index) drives aurora detection.
+	if ws.sw != nil {
+		go ws.spaceWeatherLoop()
+	}
+
+	// Highlights scoring: rate captured frames and maintain the pinned set.
+	go ws.scoreLoop()
 
 	// Image storage lifecycle: thin prior days to ~1/hour, archive+evict aged
 	// days, and keep ImageDir under the configured disk budget.
@@ -134,6 +143,14 @@ func (ws *WeatherStationServer) backfillRecentDays() {
 	}
 }
 
+// overlayStyleArgs are the shared ImageMagick text flags for the weather overlay.
+// White text on a translucent dark box (-undercolor, ~35% black) stays legible on
+// any background — bright overcast, blue sky, foliage, or night — which the old
+// flat gray fill could not. Shared by the full overlay and the timestamp-only
+// fallback so their styling never drifts.
+const overlayStyleArgs = `-font Helvetica -antialias -gravity NorthWest ` +
+	`-undercolor '#00000059' -fill '#ffffff' -pointsize 50`
+
 // captureAndOverlay captures an RTSP frame, overlays weather data, and saves it.
 func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 	now := ws.clock.NowPacific()
@@ -177,8 +194,7 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 		// Just copy the raw capture as the current image with a timestamp
 		timeStr := now.Format("2006-01-02   3:04PM")
 		addTimeCmd := fmt.Sprintf(
-			`convert %s -font Helvetica -antialias -gravity NorthWest `+
-				`-fill '#aaaaaa' -pointsize 50 `+
+			`convert %s `+overlayStyleArgs+` `+
 				`-annotate +20+5 '%v' %s`,
 			absPath, timeStr, currentPath)
 		cmd = exec.Command("bash", "-c", addTimeCmd)
@@ -207,8 +223,7 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 
 	lineHeight := 60
 	imageMagickCmd := fmt.Sprintf(
-		`convert %s -font Helvetica -antialias -gravity NorthWest `+
-			`-fill '#aaaaaa' -pointsize 50 `+
+		`convert %s `+overlayStyleArgs+` `+
 			`-annotate +20+5 '%v' `+
 			`-annotate +20+%d 'Temp: %.0fF (feels-like %.0fF)' `+
 			`-annotate +20+%d 'Wind: %.0f mph (Gusts: %.0f mph)' `+

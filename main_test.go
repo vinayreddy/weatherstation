@@ -30,6 +30,10 @@ func TestLoadConfig(t *testing.T) {
 	t.Setenv("WS_MAILTRAP_API_TOKEN", "mt-token")
 	t.Setenv("WS_ALERT_EMAIL_TO", "alert@example.com")
 	t.Setenv("WS_ALERT_EMAIL_FROM", "ws@example.com")
+	t.Setenv("WS_TLS_ENABLE", "true")
+	t.Setenv("WS_DOMAIN", "cam.example.com")
+	t.Setenv("WS_TLS_PORT", "9443")
+	t.Setenv("WS_CERT_DIR", "/tmp/certs")
 
 	cfg := LoadConfig()
 
@@ -57,6 +61,18 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.MailtrapAPIToken != "mt-token" {
 		t.Errorf("MailtrapAPIToken = %q", cfg.MailtrapAPIToken)
 	}
+	if !cfg.TLSEnable {
+		t.Errorf("TLSEnable = %v, want true", cfg.TLSEnable)
+	}
+	if cfg.Domain != "cam.example.com" {
+		t.Errorf("Domain = %q", cfg.Domain)
+	}
+	if cfg.TLSPort != "9443" {
+		t.Errorf("TLSPort = %q", cfg.TLSPort)
+	}
+	if cfg.CertDir != "/tmp/certs" {
+		t.Errorf("CertDir = %q", cfg.CertDir)
+	}
 }
 
 func TestLoadConfig_Defaults(t *testing.T) {
@@ -78,6 +94,15 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.HTTPPort != "8080" {
 		t.Errorf("HTTPPort default = %q", cfg.HTTPPort)
+	}
+	if cfg.TLSEnable {
+		t.Errorf("TLSEnable default = %v, want false", cfg.TLSEnable)
+	}
+	if cfg.TLSPort != "8443" {
+		t.Errorf("TLSPort default = %q, want 8443", cfg.TLSPort)
+	}
+	if cfg.CertDir != "/var/lib/weatherstation/certs" {
+		t.Errorf("CertDir default = %q", cfg.CertDir)
 	}
 	if cfg.RefreshSecs != 30 {
 		t.Errorf("RefreshSecs default = %d, want 30", cfg.RefreshSecs)

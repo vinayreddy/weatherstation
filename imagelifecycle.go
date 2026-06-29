@@ -101,10 +101,18 @@ func (ws *WeatherStationServer) thinPriorDays(liveRoot string, today time.Time) 
 	return nil
 }
 
-// thinDay keeps the earliest image in each hour and deletes the rest (file +
-// row). Idempotent: a day already thinned to <=1 file per hour is a no-op.
+// thinDay keeps, in each hour, the highest-interest image (ties broken toward the
+// earliest) plus any pinned frames, deleting the rest (file + row). Keeping the
+// best frame rather than the earliest means a striking moment — an aurora, a
+// lightning-lit sky — survives thinning instead of being dropped for whatever
+// happened to capture first. Unscored frames all score 0, so this degrades to
+// "keep earliest". Idempotent: a day already at <=1 file per hour is a no-op.
 func (ws *WeatherStationServer) thinDay(d dayDir) error {
 	entries, err := os.ReadDir(d.path)
+	if err != nil {
+		return err
+	}
+	meta, err := ImageMetaInRange(ws.db, d.date.Unix(), d.date.AddDate(0, 0, 1).Unix())
 	if err != nil {
 		return err
 	}
@@ -120,8 +128,23 @@ func (ws *WeatherStationServer) thinDay(d dayDir) error {
 		if len(names) <= 1 {
 			continue
 		}
-		sort.Strings(names) // deterministic: earliest HHMMSS first
-		for _, name := range names[1:] {
+		sort.Strings(names) // earliest HHMMSS first, so ties keep the earliest
+
+		// Find the hour's best (highest score) frame.
+		best := 0
+		scores := make([]imgMeta, len(names))
+		for i, name := range names {
+			if ts, ok := fileTimestamp(d, name); ok {
+				scores[i] = meta[ts]
+			}
+			if scores[i].Score > scores[best].Score {
+				best = i
+			}
+		}
+		for i, name := range names {
+			if i == best || scores[i].Pinned {
+				continue // keep the best frame and every pinned frame
+			}
 			rel := "live/" + d.date.Format("2006/01/02") + "/" + name // matches imagePath()
 			if err := os.Remove(filepath.Join(d.path, name)); err != nil && !os.IsNotExist(err) {
 				slog.Error("thin remove failed", "file", name, "err", err)
@@ -133,6 +156,20 @@ func (ws *WeatherStationServer) thinDay(d dayDir) error {
 		}
 	}
 	return nil
+}
+
+// fileTimestamp maps an HHMMSS.jpg filename in a day directory to its unix time.
+func fileTimestamp(d dayDir, name string) (int64, bool) {
+	if len(name) < 6 {
+		return 0, false
+	}
+	hh, e1 := strconv.Atoi(name[0:2])
+	mm, e2 := strconv.Atoi(name[2:4])
+	ss, e3 := strconv.Atoi(name[4:6])
+	if e1 != nil || e2 != nil || e3 != nil {
+		return 0, false
+	}
+	return time.Date(d.date.Year(), d.date.Month(), d.date.Day(), hh, mm, ss, 0, ptLocation).Unix(), true
 }
 
 // enforceRetention archives+deletes every day older than the retention window.
@@ -182,11 +219,12 @@ func (ws *WeatherStationServer) enforceDiskCap(liveRoot string, today time.Time)
 		if !d.date.Before(today) {
 			break // never evict today
 		}
-		freed, _ := dirSize(d.path)
+		before, _ := dirSize(d.path)
 		if err := ws.archiveAndDeleteDay(liveRoot, d); err != nil {
 			return err // do not delete un-archived data on failure
 		}
-		total -= freed
+		after, _ := dirSize(d.path) // pinned frames may remain
+		total -= before - after
 	}
 	if total > limit {
 		slog.Warn("image dir still over budget after evicting all prior days",
@@ -198,6 +236,11 @@ func (ws *WeatherStationServer) enforceDiskCap(liveRoot string, today time.Time)
 // archiveAndDeleteDay pushes a day to the archive (if configured) and only then
 // removes it locally. It never deletes un-archived data: if the rsync fails it
 // returns an error and leaves the local bytes in place for the next cycle.
+//
+// Pinned frames (top highlights) are exempt from local removal: the whole day is
+// still rsync'd so their bytes are safely at the archive destination, but the
+// pinned files stay on local disk with is_archived = 0 so they remain viewable. The
+// rest of the day is marked archived (or row-deleted) and removed as usual.
 func (ws *WeatherStationServer) archiveAndDeleteDay(liveRoot string, d dayDir) error {
 	if ws.config.ImageArchiveDest != "" {
 		if err := ws.rsyncDay(d); err != nil {
@@ -214,17 +257,52 @@ func (ws *WeatherStationServer) archiveAndDeleteDay(liveRoot string, d dayDir) e
 			return Wrap(err, "mark archived")
 		}
 	} else {
-		if _, err := DeleteImagesInRange(ws.db, dayStart, dayEnd); err != nil {
+		if _, err := DeleteUnpinnedInRange(ws.db, dayStart, dayEnd); err != nil {
 			return Wrap(err, "delete rows")
 		}
 	}
 
-	if err := os.RemoveAll(d.path); err != nil {
-		return Wrap(err, "remove day dir")
+	// Remove local files, preserving any pinned frames.
+	pinned, err := PinnedInRange(ws.db, dayStart, dayEnd)
+	if err != nil {
+		return Wrap(err, "load pinned")
 	}
-	pruneEmptyParents(filepath.Dir(d.path), liveRoot)
+	if len(pinned) == 0 {
+		if err := os.RemoveAll(d.path); err != nil {
+			return Wrap(err, "remove day dir")
+		}
+		pruneEmptyParents(filepath.Dir(d.path), liveRoot)
+	} else {
+		keep := make(map[string]bool, len(pinned))
+		for _, p := range pinned {
+			keep[filepath.Base(p.Path)] = true
+		}
+		if err := removeDayFilesExcept(d.path, keep); err != nil {
+			return Wrap(err, "remove day files")
+		}
+	}
 	slog.Info("image day retired", "day", d.date.Format("2006-01-02"),
-		"archived", ws.config.ImageArchiveDest != "")
+		"archived", ws.config.ImageArchiveDest != "", "pinned_kept", len(pinned))
+	return nil
+}
+
+// removeDayFilesExcept deletes every .jpg in dir whose basename is not in keep.
+func removeDayFilesExcept(dir string, keep map[string]bool) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() || keep[e.Name()] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
 	return nil
 }
 

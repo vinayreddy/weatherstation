@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,6 +31,9 @@ func NewAPIMux(wss *WeatherStationServer) http.Handler {
 	// Serve camera images from disk
 	mux.Handle("GET /images/", http.StripPrefix("/images/", http.FileServer(http.Dir(wss.config.ImageDir))))
 
+	// Serve (and lazily generate) downscaled thumbnails for galleries.
+	mux.HandleFunc("GET /thumb/", wss.handleThumb)
+
 	// Pages
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -38,6 +47,9 @@ func NewAPIMux(wss *WeatherStationServer) http.Handler {
 	})
 	mux.HandleFunc("GET /highlights", func(w http.ResponseWriter, r *http.Request) {
 		templates.ExecuteTemplate(w, "highlights.html", nil)
+	})
+	mux.HandleFunc("GET /viewer", func(w http.ResponseWriter, r *http.Request) {
+		templates.ExecuteTemplate(w, "viewer.html", nil)
 	})
 
 	// JSON API
@@ -97,6 +109,11 @@ func NewAPIMux(wss *WeatherStationServer) http.Handler {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		// Optional downsampling: keep at most one image per `step` seconds. Lets
+		// dense days (a frame every 30s) load a manageable grid.
+		if step, _ := strconv.ParseInt(r.URL.Query().Get("step"), 10, 64); step > 0 {
+			images = downsampleImages(images, step)
+		}
 		writeJSON(w, map[string]any{
 			"images": images,
 			"date":   dateStr,
@@ -122,7 +139,95 @@ func NewAPIMux(wss *WeatherStationServer) http.Handler {
 		writeJSON(w, img)
 	})
 
+	// Top "most interesting" frames, deduplicated into events. Params: from, to
+	// (unix), category (optional filter), limit (default 60).
+	mux.HandleFunc("GET /api/highlights", func(w http.ResponseWriter, r *http.Request) {
+		to, _ := strconv.ParseInt(r.URL.Query().Get("to"), 10, 64)
+		from, _ := strconv.ParseInt(r.URL.Query().Get("from"), 10, 64)
+		if to == 0 {
+			to = time.Now().Unix()
+		}
+		if from == 0 {
+			from = to - 365*86400 // default: trailing year of local history
+		}
+		category := r.URL.Query().Get("category")
+		limit := 60
+		if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+			limit = n
+		}
+
+		// Pull a generous pool of scored frames, collapse runs into events, then trim.
+		pool, err := QueryHighlights(wss.db, from, to, category, 5000)
+		if err != nil {
+			slog.Error("query highlights failed", "err", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		events := dedupeHighlights(pool, highlightEventGap)
+		if len(events) > limit {
+			events = events[:limit]
+		}
+		writeJSON(w, map[string]any{
+			"highlights": events,
+			"from":       from,
+			"to":         to,
+		})
+	})
+
 	return mux
+}
+
+// downsampleImages keeps at most one image per stepSecs window (images must be
+// sorted ascending by timestamp). Pinned highlights are always kept so the best
+// frames never vanish from a downsampled grid.
+func downsampleImages(images []ImageRecord, stepSecs int64) []ImageRecord {
+	out := make([]ImageRecord, 0, len(images))
+	var last int64
+	for i, img := range images {
+		if i == 0 || img.Pinned || img.Timestamp-last >= stepSecs {
+			out = append(out, img)
+			last = img.Timestamp
+		}
+	}
+	return out
+}
+
+// handleThumb serves a downscaled JPEG for /thumb/<live/...jpg>, generating and
+// caching it on first request under <ImageDir>/cache/thumb/. The cache sits
+// outside live/, so the image lifecycle never archives it and it can be safely
+// regenerated or wiped.
+func (wss *WeatherStationServer) handleThumb(w http.ResponseWriter, r *http.Request) {
+	rel := strings.TrimPrefix(r.URL.Path, "/thumb/")
+	clean := path.Clean("/" + rel) // collapse any ../ and normalise
+	// Only serve live-capture JPEGs; reject traversal and anything else.
+	if !strings.HasPrefix(clean, "/live/") || !strings.HasSuffix(clean, ".jpg") {
+		http.Error(w, "not found", 404)
+		return
+	}
+	relClean := strings.TrimPrefix(clean, "/")
+	src := filepath.Join(wss.config.ImageDir, relClean)
+	dst := filepath.Join(wss.config.ImageDir, "cache", "thumb", relClean)
+
+	if _, err := os.Stat(dst); err != nil {
+		if _, err := os.Stat(src); err != nil {
+			http.Error(w, "image not found", 404)
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			http.Error(w, "thumb error", 500)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "convert", src, "-thumbnail", "400x300", dst)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			slog.Error("thumbnail generation failed", "src", src, "err", err, "out", string(out))
+			http.Error(w, "thumb error", 500)
+			return
+		}
+	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, dst)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

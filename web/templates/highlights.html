@@ -13,6 +13,7 @@
             <h1 class="text-xl font-bold text-white">Weather Station</h1>
             <div class="flex gap-4 text-sm">
                 <a href="/" class="text-gray-400 hover:text-white">Dashboard</a>
+                <a href="/viewer" class="text-gray-400 hover:text-white">Browse</a>
                 <a href="/history" class="text-gray-400 hover:text-white">History</a>
                 <a href="/highlights" class="text-blue-400 font-medium">Highlights</a>
             </div>
@@ -20,15 +21,31 @@
     </nav>
 
     <main class="max-w-7xl mx-auto px-4 py-6">
-        <h2 class="text-2xl font-bold mb-6">Highlights</h2>
-        <p class="text-gray-400 mb-8">
-            Interesting weather moments will appear here once the image archiver is running (Phase 3).
-            For now, browse images via the <a href="/history" class="text-blue-400 hover:underline">History</a> page.
+        <h2 class="text-2xl font-bold mb-1">Highlights</h2>
+        <p class="text-gray-400 mb-6 text-sm">
+            The most interesting moments the camera has caught &mdash; storms, snow, fog, clear days,
+            golden-hour light, and possible aurora (flagged from NOAA space-weather data). Scored
+            automatically from weather conditions.
         </p>
 
-        <div id="highlights-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            <!-- Populated by JS in Phase 3 -->
-        </div>
+        <div id="highlights-loading" class="text-gray-500">Loading&hellip;</div>
+        <p id="highlights-empty" class="text-gray-400 hidden">
+            No highlights yet &mdash; they accumulate as the camera keeps capturing. Meanwhile, browse
+            everything on the <a href="/viewer" class="text-blue-400 hover:underline">Browse</a> page.
+        </p>
+        <div id="highlights-sections" class="space-y-8"></div>
     </main>
+
+    <!-- Lightbox -->
+    <div id="lightbox" class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50" onclick="closeLightbox()">
+        <button onclick="event.stopPropagation(); lbStep(-1)" class="absolute left-2 sm:left-6 text-white/70 hover:text-white text-4xl px-3 py-2 select-none">&lsaquo;</button>
+        <div class="max-w-5xl w-full mx-12" onclick="event.stopPropagation()">
+            <img id="lb-image" src="" class="w-full rounded-lg shadow-2xl">
+            <div class="text-center text-sm text-gray-300 mt-3" id="lb-caption"></div>
+        </div>
+        <button onclick="event.stopPropagation(); lbStep(1)" class="absolute right-2 sm:right-6 text-white/70 hover:text-white text-4xl px-3 py-2 select-none">&rsaquo;</button>
+    </div>
+
+    <script src="/static/highlights.js"></script>
 </body>
 </html>

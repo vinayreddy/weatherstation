@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	_ "time/tzdata" // embed timezone data for raspi
+
+	"golang.org/x/crypto/acme/autocert"
 )
 
 //go:embed web/templates web/static
@@ -77,14 +79,33 @@ type Config struct {
 	AlertEmailTo     string
 	AlertEmailFrom   string
 
+	// HTTPS / TLS via Let's Encrypt (autocert). When TLSEnable is false the
+	// server stays plain-HTTP on HTTPPort (local dev + fallback) — unchanged.
+	TLSEnable bool   // WS_TLS_ENABLE  — terminate TLS in-process
+	Domain    string // WS_DOMAIN      — FQDN the cert is issued for
+	TLSPort   string // WS_TLS_PORT    — in-process HTTPS listen port
+	CertDir   string // WS_CERT_DIR    — autocert DirCache dir (must persist + be writable)
+	ACMEEmail string // WS_ACME_EMAIL  — optional LE account email (expiry notices)
+
 	// Image storage lifecycle.
 	ImageDiskLimit         int64  // hard cap on ImageDir size in bytes; <=0 disables
 	ImageRetentionDays     int    // keep this many days locally; older is archived+deleted
 	ImageArchiveDest       string // rsync dest e.g. user@host:/path; "" => delete without archiving
 	ImageArchiveEveryHours int    // cadence (hours) for the retention/archival sweep
+
+	// Highlights / aurora.
+	Latitude          float64 // camera latitude, degrees north (for sun position)
+	Longitude         float64 // camera longitude, degrees east (Seattle is negative)
+	AuroraKpThreshold float64 // min NOAA Kp index to flag an aurora candidate
+	HighlightPinCount int     // top-N highlight frames kept on local disk indefinitely
 }
 
 var knownEnvVars = map[string]bool{
+	"WS_TLS_ENABLE":                true,
+	"WS_DOMAIN":                    true,
+	"WS_TLS_PORT":                  true,
+	"WS_CERT_DIR":                  true,
+	"WS_ACME_EMAIL":                true,
 	"WS_WU_API_KEY":                true,
 	"WS_WU_STATION_ID":             true,
 	"WS_RTSP_STREAM":               true,
@@ -99,6 +120,10 @@ var knownEnvVars = map[string]bool{
 	"WS_IMAGE_RETENTION_DAYS":      true,
 	"WS_IMAGE_ARCHIVE_DEST":        true,
 	"WS_IMAGE_ARCHIVE_EVERY_HOURS": true,
+	"WS_LATITUDE":                  true,
+	"WS_LONGITUDE":                 true,
+	"WS_AURORA_KP_THRESHOLD":       true,
+	"WS_HIGHLIGHT_PIN_COUNT":       true,
 }
 
 func LoadConfig() *Config {
@@ -114,10 +139,22 @@ func LoadConfig() *Config {
 		AlertEmailTo:     os.Getenv("WS_ALERT_EMAIL_TO"),
 		AlertEmailFrom:   getEnv("WS_ALERT_EMAIL_FROM", "weatherstation@localhost"),
 
+		TLSEnable: getEnvBool("WS_TLS_ENABLE", false),
+		Domain:    os.Getenv("WS_DOMAIN"),
+		TLSPort:   getEnv("WS_TLS_PORT", "8443"),
+		CertDir:   getEnv("WS_CERT_DIR", "/var/lib/weatherstation/certs"),
+		ACMEEmail: os.Getenv("WS_ACME_EMAIL"),
+
 		ImageDiskLimit:         getEnvSize("WS_IMAGE_DISK_LIMIT", "5GB"),
 		ImageRetentionDays:     getEnvInt("WS_IMAGE_RETENTION_DAYS", 90),
 		ImageArchiveDest:       os.Getenv("WS_IMAGE_ARCHIVE_DEST"),
 		ImageArchiveEveryHours: getEnvInt("WS_IMAGE_ARCHIVE_EVERY_HOURS", 24),
+
+		// Defaults point at the camera's location (Seattle, Capitol Hill).
+		Latitude:          getEnvFloat("WS_LATITUDE", 47.62),
+		Longitude:         getEnvFloat("WS_LONGITUDE", -122.32),
+		AuroraKpThreshold: getEnvFloat("WS_AURORA_KP_THRESHOLD", 6),
+		HighlightPinCount: getEnvInt("WS_HIGHLIGHT_PIN_COUNT", 300),
 	}
 }
 
@@ -202,6 +239,24 @@ func getEnvInt(key string, fallback int) int {
 	if val := os.Getenv(key); val != "" {
 		if n, err := strconv.Atoi(val); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if val := os.Getenv(key); val != "" {
+		if b, err := strconv.ParseBool(val); err == nil {
+			return b
+		}
+	}
+	return fallback
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if val := os.Getenv(key); val != "" {
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			return f
 		}
 	}
 	return fallback
@@ -324,17 +379,55 @@ func main() {
 		al:     alerter,
 		db:     db,
 		wu:     wu,
+		sw:     NewSpaceWeatherClient(), // NOAA SWPC needs no API key
 	}
 
-	// Start HTTP server in background
+	// Start the web server(s) in the background; backgroundLoop() runs on main.
 	mux := NewAPIMux(wss)
-	go func() {
-		addr := ":" + cfg.HTTPPort
-		slog.Info("starting HTTP server", "addr", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
-			log.Fatalf("HTTP server failed: %v", err)
+	if cfg.TLSEnable {
+		if cfg.Domain == "" {
+			log.Fatal("WS_DOMAIN is required when WS_TLS_ENABLE=true")
 		}
-	}()
+		// TLS terminated in-process via Let's Encrypt. Certs are obtained lazily
+		// on the first TLS handshake and cached under cfg.CertDir.
+		m := &autocert.Manager{
+			Cache:      autocert.DirCache(cfg.CertDir),
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(cfg.Domain),
+			Email:      cfg.ACMEEmail, // "" is allowed
+		}
+		// HTTP listener: answers ACME HTTP-01 challenges and 302-redirects
+		// everything else to HTTPS. External:80 -> Pi:WS_HTTP_PORT.
+		go func() {
+			addr := ":" + cfg.HTTPPort
+			slog.Info("starting ACME/redirect HTTP server", "addr", addr, "domain", cfg.Domain)
+			if err := http.ListenAndServe(addr, m.HTTPHandler(nil)); err != nil {
+				log.Fatalf("ACME HTTP server failed: %v", err)
+			}
+		}()
+		// HTTPS listener: serves the app. External:443 -> Pi:WS_TLS_PORT.
+		// TLSConfig supplies GetCertificate, so ListenAndServeTLS takes no files.
+		go func() {
+			srv := &http.Server{
+				Addr:      ":" + cfg.TLSPort,
+				Handler:   mux,
+				TLSConfig: m.TLSConfig(),
+			}
+			slog.Info("starting HTTPS server", "addr", srv.Addr, "domain", cfg.Domain, "certDir", cfg.CertDir)
+			if err := srv.ListenAndServeTLS("", ""); err != nil {
+				log.Fatalf("HTTPS server failed: %v", err)
+			}
+		}()
+	} else {
+		// Plain HTTP — unchanged behavior for local dev and the fallback case.
+		go func() {
+			addr := ":" + cfg.HTTPPort
+			slog.Info("starting HTTP server", "addr", addr)
+			if err := http.ListenAndServe(addr, mux); err != nil {
+				log.Fatalf("HTTP server failed: %v", err)
+			}
+		}()
+	}
 
 	wss.backgroundLoop()
 }

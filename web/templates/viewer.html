@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browse - Weather Station</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <nav class="bg-gray-800 border-b border-gray-700">
+        <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+            <h1 class="text-xl font-bold text-white">Weather Station</h1>
+            <div class="flex gap-4 text-sm">
+                <a href="/" class="text-gray-400 hover:text-white">Dashboard</a>
+                <a href="/viewer" class="text-blue-400 font-medium">Browse</a>
+                <a href="/history" class="text-gray-400 hover:text-white">History</a>
+                <a href="/highlights" class="text-gray-400 hover:text-white">Highlights</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        <!-- Day picker + density control -->
+        <div class="flex flex-wrap gap-2 mb-6 items-center">
+            <button onclick="stepDay(-1)" class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm" title="Previous day">&larr;</button>
+            <input type="date" id="viewer-date" class="bg-gray-700 rounded px-2 py-1 text-sm">
+            <button onclick="stepDay(1)" id="next-btn" class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm" title="Next day">&rarr;</button>
+            <button onclick="goToday()" class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm">Today</button>
+            <span class="text-gray-600 mx-1">|</span>
+            <label class="text-sm text-gray-400">Every</label>
+            <select id="viewer-step" onchange="reload()" class="bg-gray-700 rounded px-2 py-1 text-sm">
+                <option value="0">All frames</option>
+                <option value="60">1 min</option>
+                <option value="300" selected>5 min</option>
+                <option value="900">15 min</option>
+                <option value="3600">1 hour</option>
+            </select>
+            <span id="viewer-count" class="text-sm text-gray-500 ml-2"></span>
+        </div>
+
+        <div id="viewer-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2"></div>
+        <p id="viewer-empty" class="text-gray-500 hidden">No images for this day.</p>
+    </main>
+
+    <!-- Lightbox -->
+    <div id="lightbox" class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50" onclick="closeLightbox()">
+        <button onclick="event.stopPropagation(); lbStep(-1)" class="absolute left-2 sm:left-6 text-white/70 hover:text-white text-4xl px-3 py-2 select-none">&lsaquo;</button>
+        <div class="max-w-5xl w-full mx-12" onclick="event.stopPropagation()">
+            <img id="lb-image" src="" class="w-full rounded-lg shadow-2xl">
+            <div class="flex items-center justify-center gap-4 mt-3">
+                <button onclick="togglePlay()" id="lb-play" class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm">&#9654; Play</button>
+                <span class="text-sm text-gray-300" id="lb-caption"></span>
+            </div>
+        </div>
+        <button onclick="event.stopPropagation(); lbStep(1)" class="absolute right-2 sm:right-6 text-white/70 hover:text-white text-4xl px-3 py-2 select-none">&rsaquo;</button>
+    </div>
+
+    <script src="/static/viewer.js"></script>
+</body>
+</html>
