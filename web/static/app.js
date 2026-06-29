@@ -413,8 +413,13 @@ async function showImagePopup(ts, obs) {
 }
 
 function closePopup() {
-    document.getElementById('image-popup').classList.add('hidden');
-    document.getElementById('image-popup').classList.remove('show');
+    // Only present on the History page; guard so Escape on other pages (e.g. the
+    // dashboard, which has no #image-popup) doesn't throw and abort the handler
+    // before closeImageFullscreen() runs.
+    const el = document.getElementById('image-popup');
+    if (!el) return;
+    el.classList.add('hidden');
+    el.classList.remove('show');
 }
 
 // Close popups on Escape key
