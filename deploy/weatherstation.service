@@ -1,0 +1,75 @@
+# weatherstation.service — hardened systemd unit.
+#
+# This file is a TEMPLATE: scripts/deploy.sh fills in the placeholders and
+# installs it (pass --no-unit to skip). Memory caps default to a 4 GB Pi and are
+# tunable via deploy.sh: --memory-max (MemoryMax) and --gomemlimit (GOMEMLIMIT) —
+# keep GOMEMLIMIT below MemoryMax. For other core counts set CPUQuota to
+# (cores-1)*100%.
+#
+# The memory cgroup controller must be enabled or MemoryMax/MemorySwapMax are
+# SILENTLY IGNORED. deploy.sh enables it automatically (appends
+# cgroup_enable=memory cgroup_memory=1 to the boot cmdline; a reboot is then
+# required). Verify:  systemctl show weatherstation -p MemoryMax   # not 'infinity'
+
+[Unit]
+Description=Weather Station (camera capture + weather + web UI)
+After=network-online.target
+Wants=network-online.target
+# If it crash-loops more than 5 times in 5 minutes, stop and stay down (so a
+# genuinely broken build doesn't thrash) — the recovery alert will have fired.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+# systemd watchdog: the binary heartbeats only while healthy() (capture loop
+# progressing + DB reachable). If it wedges, the heartbeat stops and systemd
+# SIGABRTs (Go stack dump) + restarts — recovering from hangs, not just crashes.
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
+WatchdogSignal=SIGABRT
+
+User=@@USER@@
+WorkingDirectory=@@DIR@@
+# GOMEMLIMIT makes Go's GC reclaim aggressively *below* MemoryMax so the process
+# rarely gets OOM-killed mid-work; GOMAXPROCS matches the CPUQuota core budget.
+Environment=GOMEMLIMIT=@@GOMEMLIMIT@@ GOMAXPROCS=4
+# Run the worker directly: systemd (not the in-process fork monitor) supervises,
+# so the watchdog talks to the process that actually does the work. Config is
+# loaded by the binary's own -env flag (quote-aware), not systemd EnvironmentFile.
+ExecStart=@@DIR@@/weatherstation @@EXECARGS@@
+
+# --- Auto-recovery (no manual power-cycle) ---
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# --- Resource containment (keeps the box — and SSH — alive; sized for 4 GB) ---
+# Hard memory ceiling for THIS service's cgroup; on breach the kernel OOM-kills
+# just this cgroup (then Restart brings it back) instead of dragging the whole
+# box into swap-thrash. MemorySwapMax=0 forbids swap outright — swap-thrash on the
+# SD card is what made the Pi unreachable. GOMEMLIMIT (above) keeps Go's GC
+# reclaiming below this hard cap, so it rarely gets here.
+MemoryMax=@@MEMORY_MAX@@
+MemorySwapMax=0
+# Never peg all cores — always leave one for sshd/kernel (4-core Pi → 3 cores).
+CPUQuota=300%
+# Hard cap on threads+processes: a runaway convert/ffmpeg fork storm is refused
+# by the kernel at this ceiling instead of exhausting the process table.
+TasksMax=128
+LimitNOFILE=8192
+# If the kernel ever hits a *system-wide* OOM, sacrifice this service, never sshd.
+OOMScoreAdjust=500
+OOMPolicy=kill
+# Yield to interactive / ssh work under contention.
+Nice=5
+IOSchedulingClass=best-effort
+IOWeight=50
+
+# --- Light sandboxing --------------------------------------------------------
+# Do NOT add ProtectHome: rsync image archival writes ~/.ssh/known_hosts.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=@@WANTEDBY@@

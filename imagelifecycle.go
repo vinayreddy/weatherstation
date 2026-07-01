@@ -30,12 +30,17 @@ type dayDir struct {
 // per hour, archives+removes days older than the retention window, and enforces
 // a hard disk cap. It runs once at startup, then every hour. The filesystem
 // under <ImageDir>/live is the source of truth; DB rows are kept in sync.
-func (ws *WeatherStationServer) imageLifecycleLoop() {
+func (ws *WeatherStationServer) imageLifecycleLoop(ctx context.Context) {
 	ws.runImageLifecycleOnce()
 	ticker := time.NewTicker(lifecycleTick)
 	defer ticker.Stop()
-	for range ticker.C {
-		ws.runImageLifecycleOnce()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ws.runImageLifecycleOnce()
+		}
 	}
 }
 
@@ -152,6 +157,10 @@ func (ws *WeatherStationServer) thinDay(d dayDir) error {
 			}
 			if err := DeleteImageByPath(ws.db, rel); err != nil {
 				slog.Error("thin db delete failed", "path", rel, "err", err)
+			}
+			// Drop the cached thumbnail alongside its frame so the cache stays 1:1.
+			if err := os.Remove(thumbPath(ws.config.ImageDir, rel)); err != nil && !os.IsNotExist(err) {
+				slog.Error("thin thumb remove failed", "path", rel, "err", err)
 			}
 		}
 	}
@@ -281,6 +290,13 @@ func (ws *WeatherStationServer) archiveAndDeleteDay(liveRoot string, d dayDir) e
 			return Wrap(err, "remove day files")
 		}
 	}
+	// Prune this day's cached thumbnails too. Removing the whole thumb day dir is
+	// fine even when pinned frames remain locally: their few thumbnails simply
+	// regenerate on demand. This keeps the cache from accumulating orphans, which
+	// would otherwise count against the disk cap (cache/ lives under ImageDir).
+	if err := os.RemoveAll(thumbDayDir(ws.config.ImageDir, d)); err != nil {
+		slog.Error("thumb day cleanup failed", "day", d.date.Format("2006-01-02"), "err", err)
+	}
 	slog.Info("image day retired", "day", d.date.Format("2006-01-02"),
 		"archived", ws.config.ImageArchiveDest != "", "pinned_kept", len(pinned))
 	return nil
@@ -323,11 +339,18 @@ func (ws *WeatherStationServer) rsyncDay(d dayDir) error {
 		"-e", "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
 		src, dest)
 	cmd.WaitDelay = 5 * time.Second
-	out, err := cmd.CombinedOutput()
+	out, err := runExternal(cmd)
 	if err != nil {
 		return Wrapf(err, "rsync: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// thumbDayDir returns the cached-thumbnail directory mirroring a live day dir,
+// e.g. <ImageDir>/cache/thumb/live/2026/03/01. Removed wholesale when a day is
+// retired so the thumb cache stays in sync with the live frames.
+func thumbDayDir(imageDir string, d dayDir) string {
+	return filepath.Join(imageDir, "cache", "thumb", "live", d.date.Format("2006/01/02"))
 }
 
 // listDayDirs returns every live/YYYY/MM/DD directory with its Pacific date.

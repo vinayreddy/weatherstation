@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"embed"
 	"flag"
 	"fmt"
@@ -9,9 +10,11 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	_ "time/tzdata" // embed timezone data for raspi
 
@@ -98,6 +101,9 @@ type Config struct {
 	Longitude         float64 // camera longitude, degrees east (Seattle is negative)
 	AuroraKpThreshold float64 // min NOAA Kp index to flag an aurora candidate
 	HighlightPinCount int     // top-N highlight frames kept on local disk indefinitely
+
+	// Resource hardening.
+	MaxInflightRequests int // cap on concurrent in-flight HTTP requests; <=0 disables
 }
 
 var knownEnvVars = map[string]bool{
@@ -124,6 +130,7 @@ var knownEnvVars = map[string]bool{
 	"WS_LONGITUDE":                 true,
 	"WS_AURORA_KP_THRESHOLD":       true,
 	"WS_HIGHLIGHT_PIN_COUNT":       true,
+	"WS_MAX_INFLIGHT_REQUESTS":     true,
 }
 
 func LoadConfig() *Config {
@@ -155,6 +162,8 @@ func LoadConfig() *Config {
 		Longitude:         getEnvFloat("WS_LONGITUDE", -122.32),
 		AuroraKpThreshold: getEnvFloat("WS_AURORA_KP_THRESHOLD", 6),
 		HighlightPinCount: getEnvInt("WS_HIGHLIGHT_PIN_COUNT", 300),
+
+		MaxInflightRequests: getEnvInt("WS_MAX_INFLIGHT_REQUESTS", 64),
 	}
 }
 
@@ -374,16 +383,39 @@ func main() {
 	}
 
 	wss := &WeatherStationServer{
-		config: cfg,
-		clock:  cl,
-		al:     alerter,
-		db:     db,
-		wu:     wu,
-		sw:     NewSpaceWeatherClient(), // NOAA SWPC needs no API key
+		config:    cfg,
+		clock:     cl,
+		al:        alerter,
+		db:        db,
+		wu:        wu,
+		sw:        NewSpaceWeatherClient(), // NOAA SWPC needs no API key
+		thumbSem:  make(chan struct{}, maxConcurrentThumbs),
+		startTime: cl.Now(),
+	}
+	if cfg.MaxInflightRequests > 0 {
+		wss.inflightSem = make(chan struct{}, cfg.MaxInflightRequests)
 	}
 
-	// Start the web server(s) in the background; backgroundLoop() runs on main.
-	mux := NewAPIMux(wss)
+	// A leftover run marker means the previous run was killed (crash/OOM/watchdog)
+	// rather than shut down cleanly — alert once, now that systemd (not the
+	// fork-monitor) supervises. Then claim the marker for this run.
+	if priorUncleanExit(cfg) {
+		if err := alerter.Fire("weatherstation recovered",
+			"previous run exited uncleanly (crash, OOM-kill, or watchdog) and was auto-restarted"); err != nil {
+			slog.Error("recovery alert failed", "err", err)
+		}
+	}
+	writeRunMarker(cfg)
+
+	// Root context, cancelled on SIGINT/SIGTERM, drives graceful shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// App handler: /healthz stays outside the in-flight limiter so it always
+	// answers, even while the app sheds load with 503s.
+	handler := buildHandler(wss, NewAPIMux(wss))
+
+	var servers []*http.Server
 	if cfg.TLSEnable {
 		if cfg.Domain == "" {
 			log.Fatal("WS_DOMAIN is required when WS_TLS_ENABLE=true")
@@ -398,36 +430,72 @@ func main() {
 		}
 		// HTTP listener: answers ACME HTTP-01 challenges and 302-redirects
 		// everything else to HTTPS. External:80 -> Pi:WS_HTTP_PORT.
-		go func() {
-			addr := ":" + cfg.HTTPPort
-			slog.Info("starting ACME/redirect HTTP server", "addr", addr, "domain", cfg.Domain)
-			if err := http.ListenAndServe(addr, m.HTTPHandler(nil)); err != nil {
-				log.Fatalf("ACME HTTP server failed: %v", err)
-			}
-		}()
+		acme := &http.Server{
+			Addr:              ":" + cfg.HTTPPort,
+			Handler:           m.HTTPHandler(nil),
+			ReadHeaderTimeout: 10 * time.Second, // slowloris guard
+		}
 		// HTTPS listener: serves the app. External:443 -> Pi:WS_TLS_PORT.
-		// TLSConfig supplies GetCertificate, so ListenAndServeTLS takes no files.
-		go func() {
-			srv := &http.Server{
-				Addr:      ":" + cfg.TLSPort,
-				Handler:   mux,
-				TLSConfig: m.TLSConfig(),
-			}
-			slog.Info("starting HTTPS server", "addr", srv.Addr, "domain", cfg.Domain, "certDir", cfg.CertDir)
-			if err := srv.ListenAndServeTLS("", ""); err != nil {
-				log.Fatalf("HTTPS server failed: %v", err)
-			}
-		}()
+		https := newHTTPServer(":"+cfg.TLSPort, handler)
+		https.TLSConfig = m.TLSConfig()
+		servers = append(servers, acme, https)
+		go serve(acme, "ACME/redirect HTTP", acme.ListenAndServe)
+		go serve(https, "HTTPS", func() error { return https.ListenAndServeTLS("", "") })
 	} else {
-		// Plain HTTP — unchanged behavior for local dev and the fallback case.
-		go func() {
-			addr := ":" + cfg.HTTPPort
-			slog.Info("starting HTTP server", "addr", addr)
-			if err := http.ListenAndServe(addr, mux); err != nil {
-				log.Fatalf("HTTP server failed: %v", err)
-			}
-		}()
+		// Plain HTTP — local dev and the fallback case.
+		plain := newHTTPServer(":"+cfg.HTTPPort, handler)
+		servers = append(servers, plain)
+		go serve(plain, "HTTP", plain.ListenAndServe)
 	}
 
-	wss.backgroundLoop()
+	// systemd integration + observability.
+	notifyReady()
+	go watchdogLoop(ctx, wss.healthy)
+	go wss.metricsLoop(ctx)
+
+	// Background loops (capture/poll/score/lifecycle) run until ctx is cancelled.
+	bgDone := make(chan struct{})
+	go func() { wss.backgroundLoop(ctx); close(bgDone) }()
+
+	<-ctx.Done()
+	stop() // restore default handling so a second signal force-quits
+	slog.Info("shutting down")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for _, s := range servers {
+		if err := s.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("server shutdown", "addr", s.Addr, "err", err)
+		}
+	}
+	select {
+	case <-bgDone:
+	case <-time.After(10 * time.Second):
+		slog.Warn("background loops did not stop in time")
+	}
+	removeRunMarker(cfg)
+	slog.Info("shutdown complete")
+}
+
+// newHTTPServer builds an http.Server with conservative timeouts so slow or stuck
+// clients can't tie up goroutines/connections indefinitely. WriteTimeout sits
+// above the /thumb worst case (a cold 15s convert) with margin.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+// serve runs a listener, treating the post-Shutdown ErrServerClosed as clean.
+func serve(srv *http.Server, name string, listen func() error) {
+	slog.Info("starting "+name+" server", "addr", srv.Addr)
+	if err := listen(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("%s server failed: %v", name, err)
+	}
 }

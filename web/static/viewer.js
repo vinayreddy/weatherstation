@@ -131,21 +131,11 @@ function renderLightbox() {
   if (img.category && img.detail) caption += ` · ${img.detail}`;
   document.getElementById('lb-caption').textContent =
     `${caption}   (${lbIndex + 1}/${images.length})`;
-  loadLightboxWeather(img.timestamp);
-}
-
-// Stored frames are raw (no burned-in overlay), so show the weather from that
-// time as a caption, fetched per image. Ignores a stale response if the user
-// has already navigated to a different frame.
-async function loadLightboxWeather(ts) {
+  // Stored frames are raw (no burned-in overlay); the weather nearest each
+  // frame is attached to the /api/images payload, so no per-frame fetch is
+  // needed (timelapse play stays a zero-request loop).
   const el = document.getElementById('lb-weather');
-  el.textContent = '';
-  try {
-    const res = await fetch(`/api/nearest-observation?ts=${ts}`);
-    if (!res.ok) return;
-    const o = await res.json();
-    if (images[lbIndex] && images[lbIndex].timestamp === ts) el.textContent = fmtWeather(o);
-  } catch (e) { /* leave blank */ }
+  el.textContent = img.weather ? fmtWeather(img.weather) : '';
 }
 function lbStep(n) {
   if (!images.length) return;

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -171,7 +172,7 @@ func clamp(x, lo, hi float64) float64 {
 
 // scoreLoop scores newly-captured frames forward-only and maintains the pinned
 // set of top highlights. It runs once at startup, then every scoreLoopInterval.
-func (ws *WeatherStationServer) scoreLoop() {
+func (ws *WeatherStationServer) scoreLoop(ctx context.Context) {
 	// Establish the forward-only scoring epoch once, on first ever run.
 	if kvGet(ws.db, kvScoreSince) == "" {
 		kvSet(ws.db, kvScoreSince, strconv.FormatInt(ws.clock.Now().Unix(), 10))
@@ -179,8 +180,13 @@ func (ws *WeatherStationServer) scoreLoop() {
 	ws.runScoringOnce()
 	ticker := time.NewTicker(scoreLoopInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		ws.runScoringOnce()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ws.runScoringOnce()
+		}
 	}
 }
 

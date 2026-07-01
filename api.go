@@ -83,6 +83,10 @@ func NewAPIMux(wss *WeatherStationServer) http.Handler {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		// Cap the number of points so the payload/DOM/render cost is independent
+		// of the range length (a 30-day range is ~8.6k readings; a chart only has
+		// a few hundred px of width).
+		obs = downsampleObservations(obs, maxChartPoints)
 		writeJSON(w, map[string]any{
 			"observations": obs,
 			"from":         from,
@@ -109,13 +113,27 @@ func NewAPIMux(wss *WeatherStationServer) http.Handler {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		// Optional downsampling: keep at most one image per `step` seconds. Lets
-		// dense days (a frame every 30s) load a manageable grid.
+		// Optional user-requested downsampling by time step, then a hard cap on the
+		// number of frames so a dense day (a frame every 30s) never returns
+		// thousands of cells — and thus thousands of thumbnail requests —
+		// regardless of the capture rate.
 		if step, _ := strconv.ParseInt(r.URL.Query().Get("step"), 10, 64); step > 0 {
 			images = downsampleImages(images, step)
 		}
+		images = capImages(images, maxViewerFrames)
+
+		// Attach each frame's nearest weather so the viewer's lightbox/timelapse
+		// never makes a per-frame /api/nearest-observation call. Load the day's
+		// observations once and match by a two-pointer merge (both time-sorted);
+		// the page thus issues a constant 2 queries regardless of frame count.
+		dayObs, err := QueryObservations(wss.db, dayStart, dayEnd)
+		if err != nil {
+			// Non-fatal: serve frames without weather rather than failing the page.
+			slog.Error("query observations for image weather failed", "err", err)
+			dayObs = nil
+		}
 		writeJSON(w, map[string]any{
-			"images": images,
+			"images": attachWeather(images, dayObs),
 			"date":   dateStr,
 		})
 	})
@@ -198,6 +216,92 @@ func NewAPIMux(wss *WeatherStationServer) http.Handler {
 	return mux
 }
 
+// Per-page work is bounded to these budgets so the amount of stored data never
+// dictates how much a page fetches or renders.
+const (
+	maxChartPoints  = 1500 // max points returned by /api/observations, any range
+	maxViewerFrames = 500  // max frames returned by /api/images, any day density
+)
+
+// weatherMatchWindow bounds how far (seconds) a frame may be from an observation
+// for that reading to be shown as its weather. Matches the ±30 min window the
+// old per-frame /api/nearest-observation used.
+const weatherMatchWindow = 1800
+
+// imageWithWeather is an image frame annotated with the observation nearest its
+// capture time. Embedding ImageRecord keeps all its fields at the top level of
+// the JSON (what viewer.js already reads) and adds a "weather" field, so the
+// viewer needs no per-frame weather lookup.
+type imageWithWeather struct {
+	ImageRecord
+	Weather *Observation `json:"weather"`
+}
+
+// attachWeather annotates each frame with the observation nearest its timestamp
+// (within weatherMatchWindow). Both inputs must be sorted ascending by
+// timestamp; it runs in O(len(images)+len(obs)) via a two-pointer merge instead
+// of a query per frame. A frame with no observation in range gets Weather=nil.
+func attachWeather(images []ImageRecord, obs []Observation) []imageWithWeather {
+	out := make([]imageWithWeather, len(images))
+	j := 0
+	for i, img := range images {
+		// Advance while the next observation is at least as close as the current;
+		// safe to only move forward because images are sorted ascending too.
+		for j+1 < len(obs) &&
+			absInt64(obs[j+1].Timestamp-img.Timestamp) <= absInt64(obs[j].Timestamp-img.Timestamp) {
+			j++
+		}
+		out[i] = imageWithWeather{ImageRecord: img}
+		if j < len(obs) && absInt64(obs[j].Timestamp-img.Timestamp) <= weatherMatchWindow {
+			o := obs[j]
+			out[i].Weather = &o
+		}
+	}
+	return out
+}
+
+// capImages limits images to roughly maxN frames by keeping every stride-th
+// frame, always retaining pinned highlights (images must be sorted ascending).
+// Bounds the grid size — and thus the number of thumbnail requests — regardless
+// of how many frames a day holds. The result may exceed maxN only by however
+// many pinned frames exist off the stride, which is small.
+func capImages(images []ImageRecord, maxN int) []ImageRecord {
+	if maxN <= 0 || len(images) <= maxN {
+		return images
+	}
+	stride := (len(images) + maxN - 1) / maxN // ceil(len/maxN)
+	out := make([]ImageRecord, 0, maxN+1)
+	for i, img := range images {
+		if img.Pinned || i%stride == 0 {
+			out = append(out, img)
+		}
+	}
+	return out
+}
+
+// downsampleObservations limits obs to roughly maxN points by keeping every
+// stride-th reading (obs must be sorted ascending). Makes a history chart's
+// payload and render cost independent of the range length.
+func downsampleObservations(obs []Observation, maxN int) []Observation {
+	if maxN <= 0 || len(obs) <= maxN {
+		return obs
+	}
+	stride := (len(obs) + maxN - 1) / maxN // ceil(len/maxN)
+	out := make([]Observation, 0, maxN+1)
+	for i := 0; i < len(obs); i += stride {
+		out = append(out, obs[i])
+	}
+	return out
+}
+
+// absInt64 returns the absolute value of x.
+func absInt64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // downsampleImages keeps at most one image per stepSecs window (images must be
 // sorted ascending by timestamp). Pinned highlights are always kept so the best
 // frames never vanish from a downsampled grid.
@@ -213,10 +317,63 @@ func downsampleImages(images []ImageRecord, stepSecs int64) []ImageRecord {
 	return out
 }
 
-// handleThumb serves a downscaled JPEG for /thumb/<live/...jpg>, generating and
-// caching it on first request under <ImageDir>/cache/thumb/. The cache sits
-// outside live/, so the image lifecycle never archives it and it can be safely
-// regenerated or wiped.
+// maxConcurrentThumbs bounds how many ImageMagick `convert` processes run at
+// once for thumbnail generation. A cold Browse grid can request many thumbnails
+// at once; without a cap that spawns dozens of `convert` processes and can
+// saturate a small host (the Raspberry Pi). Thumbnails are normally
+// pre-generated at capture time (see captureAndOverlay), so this limiter mostly
+// engages for cold caches or old pinned frames.
+const maxConcurrentThumbs = 2
+
+// thumbPath returns the cache location for the thumbnail of the live frame at
+// rel (e.g. "live/2026/03/01/143000.jpg"). The cache mirrors the live/ tree
+// under <ImageDir>/cache/thumb/, outside live/ so the image lifecycle never
+// archives it; it is pruned alongside its source frame (see thinDay /
+// archiveAndDeleteDay) so it stays 1:1 with the frames on disk.
+func thumbPath(imageDir, rel string) string {
+	return filepath.Join(imageDir, "cache", "thumb", rel)
+}
+
+// ensureThumb writes a 400x300 thumbnail of src to dst if dst does not already
+// exist. A cache hit is a no-op, so `convert` runs at most once per source
+// image, ever. It writes to a temp file then renames, so a killed or timed-out
+// convert never leaves a truncated file that later looks like a valid cache hit.
+func ensureThumb(ctx context.Context, src, dst string) error {
+	if _, err := os.Stat(dst); err == nil {
+		return nil // already cached
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	tmp := dst + ".tmp"
+	out, err := runExternal(exec.CommandContext(ctx, "convert", src, "-thumbnail", "400x300", tmp))
+	if err != nil {
+		os.Remove(tmp)
+		return Wrapf(err, "convert %s: %s", src, strings.TrimSpace(string(out)))
+	}
+	return os.Rename(tmp, dst)
+}
+
+// genThumb runs ensureThumb under the thumbnail concurrency limiter, so no more
+// than maxConcurrentThumbs `convert` processes run at once. Acquisition respects
+// ctx, so a disconnected client (or a timeout) doesn't leave a goroutine parked
+// on the semaphore. A nil semaphore (unset in some tests) means no limit.
+func (wss *WeatherStationServer) genThumb(ctx context.Context, src, dst string) error {
+	if wss.thumbSem != nil {
+		select {
+		case wss.thumbSem <- struct{}{}:
+			defer func() { <-wss.thumbSem }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return ensureThumb(ctx, src, dst)
+}
+
+// handleThumb serves a downscaled JPEG for /thumb/<live/...jpg>. Thumbnails are
+// normally pre-generated at capture; on a cache miss this regenerates one
+// (rate-limited via genThumb) and caches it. A cache hit skips the semaphore
+// entirely and just serves the file.
 func (wss *WeatherStationServer) handleThumb(w http.ResponseWriter, r *http.Request) {
 	rel := strings.TrimPrefix(r.URL.Path, "/thumb/")
 	clean := path.Clean("/" + rel) // collapse any ../ and normalise
@@ -227,22 +384,17 @@ func (wss *WeatherStationServer) handleThumb(w http.ResponseWriter, r *http.Requ
 	}
 	relClean := strings.TrimPrefix(clean, "/")
 	src := filepath.Join(wss.config.ImageDir, relClean)
-	dst := filepath.Join(wss.config.ImageDir, "cache", "thumb", relClean)
+	dst := thumbPath(wss.config.ImageDir, relClean)
 
 	if _, err := os.Stat(dst); err != nil {
 		if _, err := os.Stat(src); err != nil {
 			http.Error(w, "image not found", 404)
 			return
 		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-			http.Error(w, "thumb error", 500)
-			return
-		}
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "convert", src, "-thumbnail", "400x300", dst)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			slog.Error("thumbnail generation failed", "src", src, "err", err, "out", string(out))
+		if err := wss.genThumb(ctx, src, dst); err != nil {
+			slog.Error("thumbnail generation failed", "src", src, "err", err)
 			http.Error(w, "thumb error", 500)
 			return
 		}
@@ -254,4 +406,34 @@ func (wss *WeatherStationServer) handleThumb(w http.ResponseWriter, r *http.Requ
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+// buildHandler wraps the app mux with the in-flight limiter, but registers
+// /healthz on an outer mux *outside* the limiter so health probes always answer,
+// even while the app is shedding load with 503s.
+func buildHandler(wss *WeatherStationServer, app http.Handler) http.Handler {
+	root := http.NewServeMux()
+	root.HandleFunc("/healthz", wss.handleHealthz)
+	root.Handle("/", limitInFlight(wss.inflightSem, app))
+	return root
+}
+
+// limitInFlight caps concurrent in-flight requests via a buffered semaphore.
+// Beyond the cap it replies 503 immediately instead of queuing unbounded work
+// (every request is a goroutine, and the expensive ones touch the DB or spawn
+// subprocesses). The channel doubles as the gauge len(sem) that /healthz reports.
+// A nil sem disables the limit (used in tests).
+func limitInFlight(sem chan struct{}, next http.Handler) http.Handler {
+	if sem == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+			next.ServeHTTP(w, r)
+		default:
+			http.Error(w, "server busy", http.StatusServiceUnavailable)
+		}
+	})
 }

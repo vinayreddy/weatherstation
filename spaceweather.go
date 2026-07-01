@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -95,12 +96,17 @@ func (c *SpaceWeatherClient) fetch(url string, dst any) error {
 // spaceWeatherLoop seeds the recent Kp history on startup (one call returns ~7
 // days of 3-hour buckets) and refreshes hourly. Kp itself only updates every 3
 // hours, so hourly polling is conservative.
-func (ws *WeatherStationServer) spaceWeatherLoop() {
+func (ws *WeatherStationServer) spaceWeatherLoop(ctx context.Context) {
 	ws.refreshSpaceWeather()
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
-	for range ticker.C {
-		ws.refreshSpaceWeather()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ws.refreshSpaceWeather()
+		}
 	}
 }
 

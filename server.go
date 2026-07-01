@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,47 +21,89 @@ type WeatherStationServer struct {
 	db     *sql.DB
 	wu     *WUClient
 	sw     *SpaceWeatherClient
+	// thumbSem bounds concurrent ImageMagick thumbnail generation so a cold
+	// gallery load can't spawn dozens of `convert` processes at once (see
+	// genThumb). Buffered to maxConcurrentThumbs; nil means no limit.
+	thumbSem chan struct{}
+	// inflightSem caps concurrent in-flight HTTP requests (see limitInFlight);
+	// len() is the current in-flight count reported by /healthz. nil means no cap.
+	inflightSem chan struct{}
+	// lastCaptureProgress is the unix time of the most recent capture-loop
+	// iteration; healthy() uses it to detect a wedged loop. 0 until first iteration.
+	lastCaptureProgress atomic.Int64
+	// startTime is process start, for /healthz uptime.
+	startTime time.Time
 }
 
-func (ws *WeatherStationServer) backgroundLoop() {
-	// Start weather polling in a separate goroutine
-	if ws.wu != nil {
-		go ws.weatherPollLoop()
+// externalProcs counts external subprocesses (ffmpeg/convert/rsync) currently
+// running, for the /healthz gauge and metrics log. Accounting only — the real
+// hard cap on subprocesses is the systemd unit's TasksMax.
+var externalProcs atomic.Int64
+
+// runExternal runs cmd to completion, accounting for it in externalProcs. Callers
+// set any context deadline and cmd.WaitDelay before calling.
+func runExternal(cmd *exec.Cmd) ([]byte, error) {
+	externalProcs.Add(1)
+	defer externalProcs.Add(-1)
+	return cmd.CombinedOutput()
+}
+
+// backgroundLoop runs the capture loop on the calling goroutine and starts the
+// polling/scoring/lifecycle loops as tracked goroutines. All honor ctx: on cancel
+// the capture loop stops before starting a new ffmpeg (no half-written frames) and
+// backgroundLoop waits for the others to drain before returning, so the caller can
+// safely close the DB.
+func (ws *WeatherStationServer) backgroundLoop(ctx context.Context) {
+	var wg sync.WaitGroup
+	start := func(fn func(context.Context)) {
+		wg.Go(func() { fn(ctx) })
 	}
 
+	if ws.wu != nil {
+		start(ws.weatherPollLoop)
+	}
 	// Space-weather polling (NOAA SWPC Kp index) drives aurora detection.
 	if ws.sw != nil {
-		go ws.spaceWeatherLoop()
+		start(ws.spaceWeatherLoop)
 	}
-
 	// Highlights scoring: rate captured frames and maintain the pinned set.
-	go ws.scoreLoop()
-
+	start(ws.scoreLoop)
 	// Image storage lifecycle: thin prior days to ~1/hour, archive+evict aged
 	// days, and keep ImageDir under the configured disk budget.
-	go ws.imageLifecycleLoop()
+	start(ws.imageLifecycleLoop)
 
-	// Image capture loop
+	// Image capture loop.
 	var lastAlertDay string
 	for i := int64(0); ; i++ {
+		if ctx.Err() != nil {
+			break
+		}
+		// Liveness stamp: healthy() flags the process unhealthy (→ watchdog
+		// restart) if this stops advancing, i.e. the loop is wedged.
+		ws.lastCaptureProgress.Store(ws.clock.Now().Unix())
 		slog.Debug("running image capture loop", "iteration", i)
-		if err := ws.captureAndOverlay(); err == nil {
-			time.Sleep(time.Second * time.Duration(ws.config.RefreshSecs))
-			continue
-		} else {
+
+		wait := time.Second * time.Duration(ws.config.RefreshSecs)
+		if err := ws.captureAndOverlay(); err != nil {
 			now := ws.clock.NowPacific()
 			today := now.Format(time.DateOnly)
 			if today != lastAlertDay {
 				ws.al.Fire("Error refreshing WS image", fmt.Sprintf("err: %+v", err))
 				lastAlertDay = today
 			}
-			time.Sleep(time.Minute)
+			wait = time.Minute
+		}
+		// Interruptible sleep so shutdown is prompt.
+		select {
+		case <-ctx.Done():
+		case <-time.After(wait):
 		}
 	}
+	wg.Wait()
 }
 
 // weatherPollLoop fetches weather data from WU every 5 minutes and stores it in SQLite.
-func (ws *WeatherStationServer) weatherPollLoop() {
+func (ws *WeatherStationServer) weatherPollLoop(ctx context.Context) {
 	// Backfill recent days on startup.
 	ws.backfillRecentDays()
 
@@ -70,12 +114,17 @@ func (ws *WeatherStationServer) weatherPollLoop() {
 	defer ticker.Stop()
 
 	lastBackfillDay := time.Now().Day()
-	for t := range ticker.C {
-		ws.fetchAndStoreWeather()
-		// Re-run backfill once per day (when the day rolls over).
-		if t.Day() != lastBackfillDay {
-			lastBackfillDay = t.Day()
-			ws.backfillRecentDays()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-ticker.C:
+			ws.fetchAndStoreWeather()
+			// Re-run backfill once per day (when the day rolls over).
+			if t.Day() != lastBackfillDay {
+				lastBackfillDay = t.Day()
+				ws.backfillRecentDays()
+			}
 		}
 	}
 }
@@ -159,6 +208,11 @@ const overlayStyleArgs = `-font Helvetica -antialias -gravity NorthWest ` +
 // room around the text on both IM6 (prod) and IM7 (dev).
 const nbsp = "\u00a0"
 
+// overlayTimeout bounds the ImageMagick overlay/timestamp `convert` calls. Without
+// it a hung convert would wedge the capture loop forever (and, before the
+// thumbnail fix, could accumulate). Matches the style of the ffmpeg timeout above.
+const overlayTimeout = 30 * time.Second
+
 // captureAndOverlay captures an RTSP frame, overlays weather data, and saves it.
 func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 	now := ws.clock.NowPacific()
@@ -186,7 +240,7 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 		"-frames:v", "1",
 		absPath)
 	cmd.WaitDelay = 5 * time.Second
-	cmdOutput, err := cmd.CombinedOutput()
+	cmdOutput, err := runExternal(cmd)
 	if err != nil {
 		err = Wrapf(err, "%s", string(cmdOutput))
 		err = Wrap(err, "failed to capture RTSP frame")
@@ -205,8 +259,11 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 			`convert %s `+overlayStyleArgs+` `+
 				`-annotate +20+5 '`+nbsp+`%v`+nbsp+`' %s`,
 			absPath, timeStr, currentPath)
-		cmd = exec.Command("bash", "-c", addTimeCmd)
-		cmdOutput, innerErr := cmd.CombinedOutput()
+		octx, ocancel := context.WithTimeout(context.Background(), overlayTimeout)
+		defer ocancel()
+		cmd = exec.CommandContext(octx, "bash", "-c", addTimeCmd)
+		cmd.WaitDelay = 5 * time.Second
+		cmdOutput, innerErr := runExternal(cmd)
 		if innerErr != nil {
 			slog.Error("failed to write timestamp fallback", "err", innerErr, "output", string(cmdOutput))
 		}
@@ -243,8 +300,11 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 		5+3*lineHeight, humidity, precip,
 		5+4*lineHeight, pressure,
 		currentPath)
-	cmd = exec.Command("bash", "-c", imageMagickCmd)
-	cmdOutput, err = cmd.CombinedOutput()
+	octx, ocancel := context.WithTimeout(context.Background(), overlayTimeout)
+	defer ocancel()
+	cmd = exec.CommandContext(octx, "bash", "-c", imageMagickCmd)
+	cmd.WaitDelay = 5 * time.Second
+	cmdOutput, err = runExternal(cmd)
 	if err != nil {
 		err = Wrapf(err, "%s", string(cmdOutput))
 		err = Wrap(err, "failed to overlay weather data")
@@ -258,6 +318,15 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 	}); dbErr != nil {
 		slog.Error("failed to register image in DB", "err", dbErr)
 	}
+
+	// Pre-generate the gallery thumbnail so the Browse grid is warm and the
+	// /thumb/ handler never has to shell out to ImageMagick on demand. Best-
+	// effort: a thumbnail failure must not fail the capture.
+	tctx, tcancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if terr := ws.genThumb(tctx, absPath, thumbPath(ws.config.ImageDir, relPath)); terr != nil {
+		slog.Warn("thumbnail pre-generation failed", "path", relPath, "err", terr)
+	}
+	tcancel()
 
 	return nil
 }

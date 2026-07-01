@@ -103,25 +103,33 @@ func scanImageRecord(s interface{ Scan(...any) error }) (ImageRecord, error) {
 	return img, nil
 }
 
+// maxDBConns caps the connection pool. WAL mode lets many readers run
+// concurrently alongside a single writer, so a modest pool keeps HTTP reads
+// (dashboard, viewer, history) from serialising behind a slow background writer
+// such as the hourly image-lifecycle sweep. This was previously pinned to 1,
+// which turned the single connection into a global chokepoint: any slow holder
+// blocked every other query (Go's pool has no wait timeout).
+const maxDBConns = 8
+
 func InitDB(dbPath string) *sql.DB {
-	db, err := sql.Open("sqlite", dbPath)
+	// PRAGMAs must live in the DSN, not a post-open db.Exec: busy_timeout is
+	// per-connection, so with a pool >1 an Exec would only configure whichever
+	// single connection happened to serve it. modernc.org/sqlite honours repeated
+	// _pragma query params. journal_mode=WAL is persisted in the file header, but
+	// we set it here too so a fresh DB starts in WAL from the first connection.
+	dsn := "file:" + dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		log.Fatalf("Failed to open database %s: %v", dbPath, err)
 	}
-	// SQLite only supports one concurrent writer. Limiting to a single
-	// connection serialises all access and avoids SQLITE_BUSY errors from
-	// the backfill, image-capture, and weather-poll goroutines competing
-	// for the write lock. It also guarantees the PRAGMAs below stay in
-	// effect (they are per-connection).
-	db.SetMaxOpenConns(1)
-	// Enable WAL mode for better concurrent read/write performance.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		log.Fatalf("Failed to set WAL mode: %v", err)
-	}
-	// Wait up to 5s for locks to clear instead of failing immediately with SQLITE_BUSY.
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		log.Fatalf("Failed to set busy timeout: %v", err)
-	}
+	// SQLite allows one writer at a time; concurrent writers wait out the write
+	// lock via busy_timeout (5s) rather than erroring with SQLITE_BUSY. This is
+	// safe because every write in this codebase is a single autocommit statement
+	// (no explicit BEGIN/COMMIT that could deadlock on a read->write upgrade); if
+	// multi-statement write transactions are ever added, revisit with
+	// _pragma=txlock(immediate).
+	db.SetMaxOpenConns(maxDBConns)
+	db.SetMaxIdleConns(maxDBConns)
 	if _, err := db.Exec(schema); err != nil {
 		log.Fatalf("Failed to create schema: %v", err)
 	}
