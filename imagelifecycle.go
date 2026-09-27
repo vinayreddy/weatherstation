@@ -73,19 +73,30 @@ func (ws *WeatherStationServer) runImageLifecycleOnce() {
 	if err := ws.enforceDiskCap(liveRoot, today); err != nil {
 		slog.Error("image disk-cap enforcement failed", "err", err)
 	}
+	// (d) Backup of kept images + DB + config, gated to its own cadence. Runs
+	// last so every prior day it copies has already been thinned.
+	if ws.backupDue() {
+		ws.runBackup(liveRoot, today)
+	}
 }
 
 // archiveDue reports whether the retention/archival sweep is due per the
 // configured cadence (WS_IMAGE_ARCHIVE_EVERY_HOURS).
 func (ws *WeatherStationServer) archiveDue() bool {
-	if ws.config.ImageArchiveEveryHours <= 0 {
+	return ws.cadenceDue(kvLastArchiveRun, ws.config.ImageArchiveEveryHours)
+}
+
+// cadenceDue reports whether at least everyHours have passed since the unix time
+// stored under kvKey. A missing cursor or a cadence <= 0 means always due.
+func (ws *WeatherStationServer) cadenceDue(kvKey string, everyHours int) bool {
+	if everyHours <= 0 {
 		return true
 	}
-	last, _ := strconv.ParseInt(kvGet(ws.db, kvLastArchiveRun), 10, 64)
+	last, _ := strconv.ParseInt(kvGet(ws.db, kvKey), 10, 64)
 	if last == 0 {
 		return true
 	}
-	every := time.Duration(ws.config.ImageArchiveEveryHours) * time.Hour
+	every := time.Duration(everyHours) * time.Hour
 	return ws.clock.Now().Sub(time.Unix(last, 0)) >= every
 }
 
@@ -322,22 +333,33 @@ func removeDayFilesExcept(dir string, keep map[string]bool) error {
 	return nil
 }
 
-// rsyncDay copies one day directory to the archive over ssh. Arguments are
-// passed as a slice (no shell, so the operator-controlled dest can't inject),
-// ssh runs in BatchMode so it fails fast instead of prompting, and we never use
-// --remove-source-files: local files are deleted only after rsync exits 0.
+// rsyncDay copies one day directory to the archive over ssh.
 func (ws *WeatherStationServer) rsyncDay(d dayDir) error {
-	rel := "live/" + d.date.Format("2006/01/02")
-	src := ws.config.ImageDir + "/./" + rel // "/./" marks the -R relative root
-	dest := strings.TrimRight(ws.config.ImageArchiveDest, "/") + "/"
+	return rsyncRelative(ws.config.ImageArchiveDest, ws.config.ImageDir, "live/"+d.date.Format("2006/01/02"))
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), rsyncTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "rsync",
+// rsyncRelative copies each root/rel to dest/rel in a single rsync (one ssh
+// session). Arguments are passed as a slice (no shell, so the operator-controlled
+// dest can't inject), ssh runs in BatchMode so it fails fast instead of prompting,
+// and it is additive only: no --delete and no --remove-source-files, so callers
+// delete local files only after rsync exits 0 and remote copies are never pruned.
+func rsyncRelative(dest, root string, rels ...string) error {
+	args := []string{
 		"-aR",       // archive mode + recreate the relative path under dest
 		"--partial", // keep partial files remote so an interrupted transfer resumes
 		"-e", "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
-		src, dest)
+	}
+	args = append(args, rels...)
+	args = append(args, strings.TrimRight(dest, "/")+"/")
+
+	ctx, cancel := context.WithTimeout(context.Background(), rsyncTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rsync", args...)
+	// -R recreates each source path as given, so run from root with relative
+	// sources. (The "root/./rel" marker is GNU-only; macOS openrsync ignores it
+	// and would recreate the full absolute path under dest.) A local dest must
+	// therefore be absolute.
+	cmd.Dir = root
 	cmd.WaitDelay = 5 * time.Second
 	out, err := runExternal(cmd)
 	if err != nil {

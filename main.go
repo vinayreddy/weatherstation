@@ -96,6 +96,11 @@ type Config struct {
 	ImageArchiveDest       string // rsync dest e.g. user@host:/path; "" => delete without archiving
 	ImageArchiveEveryHours int    // cadence (hours) for the retention/archival sweep
 
+	// Backup (kept images -> ImageArchiveDest; DB snapshot + config -> BackupDest).
+	BackupDest       string // rsync dest e.g. user@host:/path; "" disables backup
+	BackupEveryHours int    // cadence (hours) for the backup sweep
+	EnvFile          string // -env flag value; copied into the config backup
+
 	// Highlights / aurora.
 	Latitude          float64 // camera latitude, degrees north (for sun position)
 	Longitude         float64 // camera longitude, degrees east (Seattle is negative)
@@ -126,6 +131,8 @@ var knownEnvVars = map[string]bool{
 	"WS_IMAGE_RETENTION_DAYS":      true,
 	"WS_IMAGE_ARCHIVE_DEST":        true,
 	"WS_IMAGE_ARCHIVE_EVERY_HOURS": true,
+	"WS_BACKUP_DEST":               true,
+	"WS_BACKUP_EVERY_HOURS":        true,
 	"WS_LATITUDE":                  true,
 	"WS_LONGITUDE":                 true,
 	"WS_AURORA_KP_THRESHOLD":       true,
@@ -156,6 +163,9 @@ func LoadConfig() *Config {
 		ImageRetentionDays:     getEnvInt("WS_IMAGE_RETENTION_DAYS", 90),
 		ImageArchiveDest:       os.Getenv("WS_IMAGE_ARCHIVE_DEST"),
 		ImageArchiveEveryHours: getEnvInt("WS_IMAGE_ARCHIVE_EVERY_HOURS", 24),
+
+		BackupDest:       os.Getenv("WS_BACKUP_DEST"),
+		BackupEveryHours: getEnvInt("WS_BACKUP_EVERY_HOURS", 24),
 
 		// Defaults point at the camera's location (Seattle, Capitol Hill).
 		Latitude:          getEnvFloat("WS_LATITUDE", 47.62),
@@ -347,6 +357,7 @@ func main() {
 	loadEnvFile(*envFile)
 	WarnUnknownEnvVars()
 	cfg := LoadConfig()
+	cfg.EnvFile = *envFile
 
 	var alerter Alerter
 	if cfg.MailtrapAPIToken != "" {
