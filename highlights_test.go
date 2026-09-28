@@ -124,6 +124,107 @@ func TestThinDay_KeepsBestAndPinned(t *testing.T) {
 	}
 }
 
+// TestSetImageScoresWritesOnlyChanges verifies a scoring pass lands in one call,
+// reports only rows whose values changed, and stores the values.
+func TestSetImageScoresWritesOnlyChanges(t *testing.T) {
+	clk := NewFakeClock()
+	clk.Set(time.Date(2026, 3, 15, 12, 0, 0, 0, ptLocation))
+	ws, _ := newTestWSS(t, clk)
+	var scores []ImageScore
+	for i := range 3 {
+		ts := time.Date(2026, 3, 15, 8, i, 0, 0, ptLocation)
+		writeImg(t, ws, ts, 10)
+		scores = append(scores, ImageScore{Timestamp: ts.Unix(), Score: float64(10 * i), Category: catUninteresting})
+	}
+
+	if n, err := SetImageScores(ws.db, scores); err != nil || n != 3 {
+		t.Fatalf("first pass changed %d (err %v), want 3", n, err)
+	}
+	if n, err := SetImageScores(ws.db, scores); err != nil || n != 0 {
+		t.Errorf("identical rescore changed %d (err %v), want 0", n, err)
+	}
+	scores[1].Score, scores[1].Category, scores[1].Detail = 80, "windstorm", "Gusts 48 mph"
+	if n, err := SetImageScores(ws.db, scores); err != nil || n != 1 {
+		t.Errorf("one-row change changed %d (err %v), want 1", n, err)
+	}
+
+	var score float64
+	var cat, detail string
+	if err := ws.db.QueryRow(`SELECT interest_score, interest_category, interest_detail FROM images WHERE timestamp = ?`,
+		scores[1].Timestamp).Scan(&score, &cat, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if score != 80 || cat != "windstorm" || detail != "Gusts 48 mph" {
+		t.Errorf("stored (%v, %q, %q), want (80, windstorm, Gusts 48 mph)", score, cat, detail)
+	}
+	if n, err := SetImageScores(ws.db, nil); err != nil || n != 0 {
+		t.Errorf("empty pass changed %d (err %v), want 0", n, err)
+	}
+}
+
+// TestUpdatePinsMovesWithScores verifies the change-only UpdatePins still pins
+// exactly the top-k positive scores as they shift.
+func TestUpdatePinsMovesWithScores(t *testing.T) {
+	clk := NewFakeClock()
+	clk.Set(time.Date(2026, 3, 15, 12, 0, 0, 0, ptLocation))
+	ws, _ := newTestWSS(t, clk)
+	var tss []int64
+	for i := range 4 {
+		ts := time.Date(2026, 3, 15, 8, i, 0, 0, ptLocation)
+		writeImg(t, ws, ts, 10)
+		tss = append(tss, ts.Unix())
+	}
+	pinned := func() []int64 {
+		t.Helper()
+		rows, err := ws.db.Query(`SELECT timestamp FROM images WHERE pinned = 1 ORDER BY timestamp`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []int64
+		for rows.Next() {
+			var ts int64
+			if err := rows.Scan(&ts); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, ts)
+		}
+		return out
+	}
+	set := func(scores ...float64) {
+		t.Helper()
+		var s []ImageScore
+		for i, sc := range scores {
+			s = append(s, ImageScore{Timestamp: tss[i], Score: sc, Category: "clear"})
+		}
+		if _, err := SetImageScores(ws.db, s); err != nil {
+			t.Fatal(err)
+		}
+		if err := UpdatePins(ws.db, 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	set(50, 0, 90, 70) // top-2 positive: tss[2], tss[3]
+	if got, want := pinned(), []int64{tss[2], tss[3]}; !slices.Equal(got, want) {
+		t.Errorf("pinned %v, want %v", got, want)
+	}
+	set(50, 0, 90, 70) // unchanged pass keeps the same pins
+	if got, want := pinned(), []int64{tss[2], tss[3]}; !slices.Equal(got, want) {
+		t.Errorf("after no-op pass pinned %v, want %v", got, want)
+	}
+	set(95, 0, 90, 10) // tss[0] overtakes tss[3]
+	if got, want := pinned(), []int64{tss[0], tss[2]}; !slices.Equal(got, want) {
+		t.Errorf("after reshuffle pinned %v, want %v", got, want)
+	}
+	if err := UpdatePins(ws.db, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := pinned(); len(got) != 0 {
+		t.Errorf("k=0 left pins %v, want none", got)
+	}
+}
+
 // TestArchiveKeepsPinnedLocal verifies that archival retires the day but leaves
 // pinned frames on local disk and directly viewable (is_archived = 0).
 func TestArchiveKeepsPinnedLocal(t *testing.T) {

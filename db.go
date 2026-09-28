@@ -125,9 +125,9 @@ func InitDB(dbPath string) *sql.DB {
 	// SQLite allows one writer at a time; concurrent writers wait out the write
 	// lock via busy_timeout (5s) rather than erroring with SQLITE_BUSY. This is
 	// safe because every write in this codebase is a single autocommit statement
-	// (no explicit BEGIN/COMMIT that could deadlock on a read->write upgrade); if
-	// multi-statement write transactions are ever added, revisit with
-	// _pragma=txlock(immediate).
+	// or a write-only transaction whose first statement writes (SetImageScores),
+	// so nothing can deadlock on a read->write upgrade; if a transaction that
+	// reads before writing is ever added, revisit with _pragma=txlock(immediate).
 	db.SetMaxOpenConns(maxDBConns)
 	db.SetMaxIdleConns(maxDBConns)
 	if _, err := db.Exec(schema); err != nil {
@@ -396,6 +396,53 @@ func SetImageScore(db *sql.DB, ts int64, score float64, category, detail string)
 	return err
 }
 
+// ImageScore is one computed interestingness result, for SetImageScores.
+type ImageScore struct {
+	Timestamp int64
+	Score     float64
+	Category  string
+	Detail    string
+}
+
+// SetImageScores writes a whole scoring pass in one transaction, touching only
+// rows whose values changed, and returns how many changed. Per-frame autocommits
+// over the 48h rescore window (thousands of frames every pass, each commit an
+// fsync on the SD card) held the write lock long enough that the capture loop's
+// InsertImage outlasted busy_timeout and failed with SQLITE_BUSY. The transaction
+// is write-only — its first statement is an UPDATE, so it takes the write lock
+// under busy_timeout and never hits a read->write upgrade conflict.
+func SetImageScores(db *sql.DB, scores []ImageScore) (int64, error) {
+	if len(scores) == 0 {
+		return 0, nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() // no-op after a successful Commit
+	stmt, err := tx.Prepare(`UPDATE images
+		SET interest_score = ?, interest_category = ?, interest_detail = ?
+		WHERE timestamp = ?
+		  AND (interest_score IS NOT ? OR interest_category IS NOT ? OR interest_detail IS NOT ?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	var changed int64
+	for _, s := range scores {
+		res, err := stmt.Exec(s.Score, s.Category, s.Detail, s.Timestamp, s.Score, s.Category, s.Detail)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		changed += n
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return changed, nil
+}
+
 // ImagesToScore returns local images that need (re)scoring: those at or after
 // scoreSince that are either unscored or fall within the rolling rescore window
 // (timestamp >= rescoreFrom). The rescore window lets late-arriving Kp and
@@ -428,11 +475,13 @@ func UpdatePins(db *sql.DB, k int) error {
 		_, err := db.Exec(`UPDATE images SET pinned = 0 WHERE pinned = 1`)
 		return err
 	}
-	_, err := db.Exec(`UPDATE images SET pinned = CASE WHEN timestamp IN (
-			SELECT timestamp FROM images
-			WHERE is_archived = 0 AND interest_score > 0
-			ORDER BY interest_score DESC, timestamp DESC LIMIT ?
-		) THEN 1 ELSE 0 END`, k)
+	// Only rows whose pin actually flips are written, so the usual pass (the top-k
+	// unchanged) commits nothing instead of rewriting every image row.
+	const topK = `SELECT timestamp FROM images
+		WHERE is_archived = 0 AND interest_score > 0
+		ORDER BY interest_score DESC, timestamp DESC LIMIT ?`
+	_, err := db.Exec(`UPDATE images SET pinned = (timestamp IN (`+topK+`))
+		WHERE pinned IS NOT (timestamp IN (`+topK+`))`, k, k)
 	return err
 }
 

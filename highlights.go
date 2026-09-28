@@ -216,7 +216,8 @@ func (ws *WeatherStationServer) runScoringOnce() {
 		sc.tempHigh, sc.tempLow = high, low
 	}
 
-	scored := 0
+	// Compute every score first (reads only), then write them in one transaction.
+	scores := make([]ImageScore, 0, len(imgs))
 	for _, img := range imgs {
 		obs, err := NearestObservation(ws.db, img.Timestamp, int64(nearestObsWindow/time.Second))
 		if err != nil {
@@ -232,18 +233,19 @@ func (ws *WeatherStationServer) runScoringOnce() {
 		if cat == "" {
 			cat = catUninteresting // mark as scored so it isn't re-evaluated every pass
 		}
-		if err := SetImageScore(ws.db, img.Timestamp, score, cat, detail); err != nil {
-			slog.Error("scoring: store score failed", "ts", img.Timestamp, "err", err)
-			continue
-		}
-		scored++
+		scores = append(scores, ImageScore{Timestamp: img.Timestamp, Score: score, Category: cat, Detail: detail})
+	}
+	changed, err := SetImageScores(ws.db, scores)
+	if err != nil {
+		slog.Error("scoring: store scores failed", "frames", len(scores), "err", err)
+		return // retried next pass; pins would be computed from stale scores
 	}
 
 	if err := UpdatePins(ws.db, ws.config.HighlightPinCount); err != nil {
 		slog.Error("scoring: update pins failed", "err", err)
 	}
-	if scored > 0 {
-		slog.Info("highlights scored", "frames", scored)
+	if changed > 0 {
+		slog.Info("highlights scored", "frames", len(scores), "changed", changed)
 	}
 }
 

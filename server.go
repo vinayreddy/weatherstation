@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,6 +49,17 @@ func runExternal(cmd *exec.Cmd) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
+// tail returns the last n bytes of s with whitespace runs collapsed, for one-line
+// logs of multi-line tool output whose useful part is at the end (e.g. ffmpeg's
+// "...: signal: killed").
+func tail(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= n {
+		return s
+	}
+	return "..." + s[len(s)-n:]
+}
+
 // backgroundLoop runs the capture loop on the calling goroutine and starts the
 // polling/scoring/lifecycle loops as tracked goroutines. All honor ctx: on cancel
 // the capture loop stops before starting a new ffmpeg (no half-written frames) and
@@ -85,6 +97,9 @@ func (ws *WeatherStationServer) backgroundLoop(ctx context.Context) {
 
 		wait := time.Second * time.Duration(ws.config.RefreshSecs)
 		if err := ws.captureAndOverlay(); err != nil {
+			// Log every failure: the alert below fires only once per day, which
+			// hid a sustained failure rate behind a single midnight email.
+			slog.Warn("capture failed", "err", tail(err.Error(), 300))
 			now := ws.clock.NowPacific()
 			today := now.Format(time.DateOnly)
 			if today != lastAlertDay {
@@ -213,6 +228,27 @@ const nbsp = "\u00a0"
 // thumbnail fix, could accumulate). Matches the style of the ffmpeg timeout above.
 const overlayTimeout = 30 * time.Second
 
+// captureArgs builds the ffmpeg arguments that grab one frame from the RTSP
+// stream into out. -allowed_media_types video SETUPs only the video track: the
+// camera also offers AAC + Opus audio, and probing those while software-decoding
+// 4K video took 38–54s per frame on the Pi — past the 30s timeout, so most
+// captures were killed. Video-only measured 9–16s there with identical 4K output.
+// -hide_banner keeps the ~1.5KB build banner out of failure alerts.
+func captureArgs(stream, out string) []string {
+	return []string{
+		"-hide_banner",
+		"-y",
+		"-rtsp_transport", "tcp",
+		"-timeout", "15000000",
+		"-allowed_media_types", "video",
+		"-i", stream,
+		"-an",
+		"-qscale:v", "3",
+		"-frames:v", "1",
+		out,
+	}
+}
+
 // captureAndOverlay captures an RTSP frame, overlays weather data, and saves it.
 func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 	now := ws.clock.NowPacific()
@@ -231,14 +267,7 @@ func (ws *WeatherStationServer) captureAndOverlay() (err error) {
 	// versions, whereas -rw_timeout is rejected by older builds e.g. ffmpeg 5.0.)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-y",
-		"-rtsp_transport", "tcp",
-		"-timeout", "15000000",
-		"-i", ws.config.RTSPStream,
-		"-qscale:v", "3",
-		"-frames:v", "1",
-		absPath)
+	cmd := exec.CommandContext(ctx, "ffmpeg", captureArgs(ws.config.RTSPStream, absPath)...)
 	cmd.WaitDelay = 5 * time.Second
 	cmdOutput, err := runExternal(cmd)
 	if err != nil {
